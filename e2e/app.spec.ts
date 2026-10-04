@@ -3,8 +3,8 @@ import { expect, test, type Page } from '@playwright/test'
 /**
  * 端到端测试（方案 §77）。
  *
- * 覆盖浏览器层面的 Test 1 / 2 / 13，以及导航、日历归档、搜索、撤销删除、
- * PWA 离线外壳（Service Worker 生效后断网重开仍然可用）。
+ * 覆盖浏览器层面的 Test 1 / 2 / 13，以及导航、日历归档、搜索、删除确认、
+ * 导出、PWA 离线外壳（Service Worker 生效后断网重开仍然可用）。
  *
  * 全部在本机模式下运行：不依赖任何云服务，正好验证「Local First」。
  */
@@ -261,19 +261,33 @@ test.describe('日历归档（§80）', () => {
   })
 })
 
-test.describe('删除与撤销（§60）', () => {
-  test('删除后从时间线消失，点撤销又回来', async ({ page }) => {
+test.describe('删除前确认（§60）', () => {
+  test('点删除先弹确认框，点「取消」不删', async ({ page }) => {
     await openApp(page)
     await capture(page, '临时想法', 'idea')
 
     await timeline(page).getByText('临时想法').click()
     await page.getByTestId('detail-delete').click()
 
-    await expect(page.getByRole('button', { name: '撤销' })).toBeVisible()
-    await expect(timeline(page).getByText('临时想法')).toHaveCount(0)
+    // 删除**不再**直接生效，而是先问一句
+    await expect(page.getByTestId('confirm-accept')).toBeVisible()
+    await page.getByTestId('confirm-cancel').click()
 
-    await page.getByRole('button', { name: '撤销' }).click()
+    // 取消之后记录还在
     await expect(timeline(page).getByText('临时想法')).toBeVisible()
+  })
+
+  test('确认后从时间线消失，且不再弹撤销', async ({ page }) => {
+    await openApp(page)
+    await capture(page, '临时想法', 'idea')
+
+    await timeline(page).getByText('临时想法').click()
+    await page.getByTestId('detail-delete').click()
+    await page.getByTestId('confirm-accept').click()
+
+    await expect(timeline(page).getByText('临时想法')).toHaveCount(0)
+    // 删前已经确认过，删后不再给撤销（同一个动作不问两遍）
+    await expect(page.getByRole('button', { name: '撤销' })).toHaveCount(0)
   })
 })
 
@@ -326,6 +340,43 @@ test.describe('同步状态可见（§65）', () => {
     await page.getByTestId('open-settings').click()
     await expect(page.getByTestId('settings-sync-phase')).toHaveText('仅本机（未连接云端）')
     await expect(page.getByTestId('settings-pending')).toContainText('条')
+  })
+})
+
+test.describe('导出全部记录', () => {
+  test('点导出能下载出一个含所有记录的 JSON 文件', async ({ page }) => {
+    await openApp(page)
+    await capture(page, '导出一条灵感', 'idea')
+    await capture(page, '导出一条待办', 'todo')
+
+    await page.getByTestId('open-settings').click()
+
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('settings-export').click(),
+    ])
+
+    // 文件名带本地日期，用户一眼能对上
+    expect(download.suggestedFilename()).toMatch(/^一刻-\d{4}-\d{2}-\d{2}\.json$/)
+
+    const stream = await download.createReadStream()
+    const chunks: Buffer[] = []
+    for await (const chunk of stream) chunks.push(chunk as Buffer)
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      count: number
+      records: { content: string; type: string }[]
+    }
+
+    expect(parsed.count).toBe(2)
+    expect(parsed.records.map((r) => r.content)).toEqual(
+      expect.arrayContaining(['导出一条灵感', '导出一条待办']),
+    )
+  })
+
+  test('没有记录时导出按钮是禁用的', async ({ page }) => {
+    await openApp(page)
+    await page.getByTestId('open-settings').click()
+    await expect(page.getByTestId('settings-export')).toBeDisabled()
   })
 })
 

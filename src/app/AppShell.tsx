@@ -33,10 +33,15 @@ export function AppShell({ userId }: AppShellProps) {
   const isDesktop = useIsDesktop()
 
   return (
-    <div className="flex min-h-screen w-full bg-canvas">
+    // 外壳定高、只让 main 滚动（桌面）。这样做有两个原因：
+    // 1. 侧栏与右侧详情面板天然「钉住」，不需要各自的 sticky 魔法 ——
+    //    以前侧栏用 `sticky top-0 h-screen` 撑高，鼠标划过它时滚轮事件被吞，
+    //    页面反而滚不动（真实反馈过的 bug）。
+    // 2. 手机端保持原来的整页滚动，所以这套只在 md 以上生效。
+    <div className="flex min-h-screen w-full bg-canvas md:h-screen md:min-h-0 md:overflow-hidden">
       {isDesktop ? <DesktopSidebar userId={userId} /> : null}
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col md:h-full">
         <header className="safe-top sticky top-0 z-20 border-b border-line bg-canvas/92 backdrop-blur">
           <div className="flex h-12 items-center justify-between gap-3 px-4">
             <SyncIndicator userId={userId} />
@@ -64,7 +69,7 @@ export function AppShell({ userId }: AppShellProps) {
           </div>
         </header>
 
-        <main className="min-w-0 flex-1 pb-[calc(60px+env(safe-area-inset-bottom))] md:pb-0">
+        <main className="min-w-0 flex-1 pb-[calc(60px+env(safe-area-inset-bottom))] md:min-h-0 md:overflow-y-auto md:pb-0">
           <Routes>
             <Route path="/" element={<HomePage userId={userId} />} />
             <Route path="/ideas" element={<IdeasPage userId={userId} />} />

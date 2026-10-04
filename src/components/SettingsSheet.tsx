@@ -17,7 +17,8 @@ import { saveCloudflareSession } from '../cloud/cloudflareSession'
 import { CloudRequestError } from '../cloud/cloudflareClient'
 import { resetSupabaseClient } from '../cloud/supabaseClient'
 import { THEME_OPTIONS, themeActions, useThemeMode } from '../app/themeStore'
-import { formatChineseDateTime } from '../utils/time'
+import { formatChineseDateTime, localDateOf } from '../utils/time'
+import { buildExportFile, downloadJson, exportFileName } from '../utils/exportRecords'
 import { uiActions } from '../app/uiStore'
 import { Modal } from './Modal'
 
@@ -123,6 +124,15 @@ export function SettingsSheet({ open, userId }: SettingsSheetProps) {
   async function handleSignOut() {
     await authService.signOut()
     uiActions.closeSettings()
+  }
+
+  function handleExport() {
+    // 导出的是 useAllRecords（本机 IndexedDB 全量，含软删墓碑），
+    // 不是当前页面的过滤结果 —— 备份要的是完整，不是「看得见的那些」。
+    const now = new Date()
+    const file = buildExportFile(records, now.toISOString())
+    // 文件名用本地日期：用户一眼能对上「这是我哪天导的」
+    downloadJson(exportFileName(localDateOf(now)), JSON.stringify(file, null, 2))
   }
 
   const isCloud = view === 'cloud'
@@ -232,6 +242,21 @@ export function SettingsSheet({ open, userId }: SettingsSheetProps) {
                 立即同步
               </button>
             ) : null}
+
+            {/* 导出：这是用户自己手里的完整底稿，跟「待同步 / 本机记录」
+                是一组信息（都是「我有多少数据」），所以放在同一个区块里。 */}
+            <button
+              type="button"
+              disabled={records.length === 0}
+              onClick={handleExport}
+              data-testid="settings-export"
+              className="tap tap-active mt-2 h-10 rounded-xl border border-line px-3.5 text-[14px] text-ink-soft disabled:opacity-50"
+            >
+              导出全部记录
+            </button>
+            <p className="mt-2 text-[12px] leading-5 text-ink-soft">
+              存成一份 JSON 文件（含已删除的）。留个底稿，或者拿去别处分析。
+            </p>
           </section>
 
           {/* 云端连接的入口。当前状态直接写在右侧 ——

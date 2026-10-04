@@ -131,6 +131,7 @@ const TEXT_PAIRS = {
   'on-idea': ['idea'],
   'on-todo': ['todo'],
   'on-project': ['project'],
+  'on-danger': ['danger'],
 }
 
 /** 只用于装饰（分隔线旁的小圆点、关闭图标），不承载语义 */

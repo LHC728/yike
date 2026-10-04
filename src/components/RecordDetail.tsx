@@ -6,6 +6,7 @@ import { recordActions, useRecord } from '../hooks/useRecords'
 import { formatChineseDateTime } from '../utils/time'
 import { toaster } from '../app/toastStore'
 import { Modal } from './Modal'
+import { ConfirmDialog } from './ConfirmDialog'
 import { ProjectEditor } from './ProjectEditor'
 import { ProjectLogs } from './ProjectLogs'
 
@@ -29,6 +30,9 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
+  // 删除前先问一句（用户拍板）。删除是 V1 里唯一「一键丢数据」的动作：
+  // 打勾能再点回来、编辑能改回去，只有删除是不可逆的（软删但界面上找不回来）。
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   // 切换记录时由调用方通过 key 重新挂载，编辑状态自然复位
   const edited = useMemo(() => {
@@ -56,13 +60,10 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
     const id = record.id
     await recordActions.remove(id)
     onClose()
-    toaster.show({
-      message: '已删除',
-      actionLabel: '撤销',
-      onAction: () => {
-        void recordActions.restore(id)
-      },
-    })
+    // 删除**不再弹撤销**（用户拍板）：删前已经确认过一次了，
+    // 删完再拦一次等于同一个动作问两遍。撤销那条留给「打勾」——
+    // 那个是一键就能回来的动作，值得给后悔药。
+    toaster.show({ message: '已删除' })
   }
 
   async function handleToggleComplete() {
@@ -196,7 +197,7 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
 
             <button
               type="button"
-              onClick={() => void handleDelete()}
+              onClick={() => setConfirmingDelete(true)}
               data-testid="detail-delete"
               className="tap tap-active h-10 rounded-[10px] px-3 text-[14px] text-danger"
             >
@@ -205,6 +206,23 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
           </>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        title="删除这条记录？"
+        description={
+          record.type === 'project'
+            ? // 说清「进展不会被连坐删掉」：它们是独立记录，
+              // 删了大事之后进展仍在本地（撤销删除还能原样回来），
+              // 只是界面上没地方看它们了。
+              '它会从所有设备上消失。它的进展记录不会被一起删除，但界面里暂时看不到它们。'
+            : '它会从所有设备上消失。'
+        }
+        confirmLabel="删除"
+        tone="danger"
+        onConfirm={handleDelete}
+        onCancel={() => setConfirmingDelete(false)}
+      />
     </div>
   )
 }
@@ -223,7 +241,7 @@ export function RecordDetail({ recordId, onClose }: RecordDetailProps) {
 export function RecordDetailPanel({ recordId, onClose }: RecordDetailProps) {
   return (
     <aside
-      className="flex w-[320px] shrink-0 flex-col border-l border-line bg-surface"
+      className="flex h-full w-[320px] shrink-0 flex-col border-l border-line bg-surface"
       aria-label="记录详情"
     >
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">

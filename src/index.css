@@ -48,6 +48,9 @@
   --color-on-idea: #ffffff;
   --color-on-todo: #ffffff;
   --color-on-project: #ffffff;
+  /* 危险按钮（删除确认）的实心底色上的字。跟 on-idea 同规律，
+     浅色主题配白字 4.87:1、暗色主题配深字 6.88:1，都过 4.5:1。 */
+  --color-on-danger: #ffffff;
 
   /* 弹层背后的遮罩 */
   --color-scrim: rgba(28, 28, 30, 0.28);
@@ -351,6 +354,7 @@ html.dark {
   --color-on-idea: #17161a;
   --color-on-todo: #17161a;
   --color-on-project: #17161a;
+  --color-on-danger: #17161a;
 
   --color-scrim: rgba(0, 0, 0, 0.62);
 
