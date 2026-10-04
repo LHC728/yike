@@ -1,5 +1,16 @@
 @import 'tailwindcss';
 
+/* ⚠️ Tailwind 的 preflight（在 `tailwindcss/index.css` 的 `@layer base` 里，
+   **不是**那个单独的 preflight.css 文件）会给 `html, :host` 加一句
+   `-webkit-text-size-adjust: 100%`。它会在 iOS 上参与「文本自动缩放」的判定，
+   有干扰单指触摸滚动识别的风险 —— 详见文件里 `html {}` 附近的说明。
+   这里用 `!important` 把它压掉：**这是唯一一处、也是特意为之**的 important。
+   不要再往别处加 important。 */
+html {
+  -webkit-text-size-adjust: none !important;
+  text-size-adjust: none !important;
+}
+
 /* ---------------------------------------------------------------
    设计令牌 V2：暖纸感 / 安静 / 但绝不隐形
 
@@ -145,10 +156,20 @@
     color-scheme: light;
   }
 
-  html {
-    -webkit-text-size-adjust: 100%;
-    text-size-adjust: 100%;
-  }
+  /* ⚠️ 这里**不要**再写 `-webkit-text-size-adjust: 100%` / `text-size-adjust: 100%`。
+
+     它原本是为了防「横竖屏切换时字体被自动放大」。但我们自己定义了断点
+     （`--breakpoint-md: 1120px`），字号被轻微改变并不致命；而这个属性在
+     iOS 上有**副作用**：它会参与「文本自动缩放」的判定，在 <meta viewport>
+     里同时有 `width=device-width` 与 `initial-scale=1.0` 时行为未明确定义，
+     个别 iOS 版本上会干扰单指触摸滚动的识别 —— 表现就是「手指滑不动页面」。
+
+     也就是说，它防的是一个小麻烦，代价可能是整个页面划不动，
+     而这个风险已经被真实反馈触发过一次。不值得，直接不要了。
+
+     顺带：`body` 的 `font-size: 15px` 也**不能当成定值依赖** ——
+     iOS 的文本自动缩放可能把它放大。但项目里几乎所有文字都写了显式
+     的 `text-[Npx]`，所以整体是稳的，不用为它加限制。 */
 
   body {
     margin: 0;

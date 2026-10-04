@@ -252,3 +252,31 @@ describe('触摸滚动红线：不许有整页级别的触摸拦截', () => {
     expect(code).toMatch(/overflow-x:\s*hidden/)
   })
 })
+
+describe('iOS 文本自动缩放：不许让它干扰滚动', () => {
+  /**
+   * 真机上踩过：手机上装的 PWA **单指划不动，要先两根手指缩放一下才能划**。
+   *
+   * `-webkit-text-size-adjust` 会在 iOS 上参与「文本自动缩放」的判定，
+   * 而 `<meta viewport>` 里同时有 `width=device-width` 与 `initial-scale=1.0`
+   * 时它的行为**没有被明确定义** —— 个别 iOS 版本上会干扰单指触摸滚动的识别。
+   * 所以必须是 `none`，不能是 `100%`（Tailwind preflight 的默认值）。
+   *
+   * ⚠️ 这条只能靠 `!important` 压住 preflight 的 `html, :host { … 100% }`，
+   * 是本项目唯一允许的 important。断言里特意检查了这个 important ——
+   * 把 important 去掉之后，构建产物里就是 preflight 的 100% 生效，又回到老 bug。
+   */
+  const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+
+  it('显式设成 none，且用 !important 压住 preflight', () => {
+    // 只看 html 那条规则，不看注释
+    const code = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(code).toMatch(/-webkit-text-size-adjust:\s*none\s*!important/)
+    expect(code).toMatch(/(?<!-webkit-)text-size-adjust:\s*none\s*!important/)
+  })
+
+  it('没有把 text-size-adjust 再设回 100%', () => {
+    const code = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(code).not.toMatch(/text-size-adjust:\s*100%/)
+  })
+})
