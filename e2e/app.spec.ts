@@ -456,6 +456,44 @@ test.describe('移动端体验（§70）', () => {
 })
 
 /**
+ * 滚轮必须到处都能用。
+ *
+ * 这里踩过两次坑，都是**用户实际操作时才发现的**：
+ * 1. 侧栏用 `sticky top-0 h-screen` 撑高 → 它吃掉指针经过时的滚轮事件。
+ * 2. 即使去掉了，滚轮的事件目标仍是鼠标底下那个元素，而真正能滚的 `<main>`
+ *    是侧栏的**兄弟**、不在祖先链上 → 鼠标停在侧栏或右侧面板上就滚不动。
+ * 现在靠 onWheel 把滚动转交给 main，这组用例把行为钉住。
+ */
+test.describe('滚轮：鼠标停在哪个区域都能滚', () => {
+  // 只跑桌面：手机根本没有侧栏（那是 md: 以上才渲染的），
+  // 而且手机上滚的是 window 而不是 main，是另一套路径。
+  test.skip(({ isMobile }) => Boolean(isMobile), '只在桌面形态下有意义')
+
+  test('桌面：左侧导航与右侧面板上滚，页面都要跟着动', async ({ page }) => {
+    await openApp(page)
+    // 多造几条把页面撑长，否则没有可滚的空间
+    for (let i = 1; i <= 20; i++) {
+      await capture(page, `第 ${i} 条记录用来撑长页面`, 'idea')
+    }
+    await timeline(page).getByText('第 20 条记录用来撑长页面').click()
+
+    const mainTop = () => page.evaluate(() => document.querySelector('main')?.scrollTop ?? 0)
+
+    // 左侧导航区
+    let before = await mainTop()
+    await page.mouse.move(100, 400)
+    await page.mouse.wheel(0, 400)
+    await expect.poll(mainTop, { timeout: 3000 }).toBeGreaterThan(before)
+
+    // 右侧详情面板区（这条记录内容短、面板装得下 → 必须把滚动转交给 main）
+    before = await mainTop()
+    await page.mouse.move(1180, 400)
+    await page.mouse.wheel(0, 400)
+    await expect.poll(mainTop, { timeout: 3000 }).toBeGreaterThan(before)
+  })
+})
+
+/**
  * 大事（目前在做的大事）—— 首页的第三个功能。
  *
  * 它是**独立一栏**，插在输入框与时间线之间，和「记为灵感 / 记为待办」

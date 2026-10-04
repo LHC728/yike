@@ -160,7 +160,18 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
-    overscroll-behavior-y: none;
+  }
+
+  /* 手机上不许「下拉刷新」：手指往下拽时浏览器会弹出刷新圈，把页面搞乱。
+     但**只能对触摸设备关**，不能全局关 —— 真实反馈过的 bug：
+     桌面浏览器窗口拉窄之后（跌到手机形态、滚动容器变成 <html>），
+     `overscroll-behavior-y: none` 会把**滚轮的默认滚动一起掐掉**，
+     表现就是「滚轮完全没反应，只能拖动右侧滚动条」。
+     `pointer: coarse` 正好区分开：触摸屏是 coarse，鼠标是 fine。 */
+  @media (pointer: coarse) {
+    body {
+      overscroll-behavior-y: none;
+    }
   }
 
   /* 不允许横向溢出 */

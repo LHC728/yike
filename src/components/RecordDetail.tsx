@@ -4,6 +4,7 @@ import { X } from 'lucide-react'
 import { db } from '../db/db'
 import { recordActions, useRecord } from '../hooks/useRecords'
 import { formatChineseDateTime } from '../utils/time'
+import { forwardWheelToMain } from '../utils/wheel'
 import { toaster } from '../app/toastStore'
 import { Modal } from './Modal'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -239,10 +240,31 @@ export function RecordDetail({ recordId, onClose }: RecordDetailProps) {
 
 /** 桌面端：右侧面板，点开记录不丢失列表上下文 */
 export function RecordDetailPanel({ recordId, onClose }: RecordDetailProps) {
+  /**
+   * 面板自己能滚时优先滚面板（符合「滚轮滚鼠标底下那个东西」的直觉），
+   * **只有滚到底或内容装得下**的时候，才把剩下的滚动量交给 main。
+   * 不做这个的话，鼠标停在右侧空白处就完全滚不动页面 —— 真实反馈过。
+   */
+  function handleWheel(event: React.WheelEvent<HTMLElement>) {
+    // 真正的滚动容器是里面那个 div，不是 aside 本身
+    const el = event.currentTarget.querySelector<HTMLElement>('[data-detail-scroll]')
+    if (el) {
+      const canScroll = el.scrollHeight > el.clientHeight
+      if (canScroll) {
+        const atTop = el.scrollTop <= 0 && event.deltaY < 0
+        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1 && event.deltaY > 0
+        // 还在中间，交给自己滚
+        if (!atTop && !atBottom) return
+      }
+    }
+    forwardWheelToMain(event)
+  }
+
   return (
     <aside
       className="flex h-full w-[320px] shrink-0 flex-col border-l border-line bg-surface"
       aria-label="记录详情"
+      onWheel={handleWheel}
     >
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
         <span className="text-[12px] text-ink-soft">详情</span>
@@ -260,7 +282,7 @@ export function RecordDetailPanel({ recordId, onClose }: RecordDetailProps) {
       </div>
 
       {recordId ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div data-detail-scroll className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           <RecordDetailBody recordId={recordId} onClose={onClose} />
         </div>
       ) : (
