@@ -195,3 +195,60 @@ describe('桌面断点：CSS 的 md: 与 JS 的 DESKTOP_QUERY 不许漂移', () 
     expect(DESKTOP_QUERY).toBe(`(min-width: ${px}px)`)
   })
 })
+
+describe('触摸滚动红线：不许有整页级别的触摸拦截', () => {
+  /**
+   * 真机上真实踩过：手机上装的 PWA **整个页面完全划不动，所有页面都一样**。
+   * 用浏览器打开同一个地址是能划的，只有「独立窗口模式」不行。
+   *
+   * 当时唯一对**触摸形态整页生效**的样式是
+   * `@media (pointer: coarse) { body { overscroll-behavior-y: none } }` ——
+   * 本意只是「别弹下拉刷新圈」，但它是没有被广泛测试过的浏览器特性，
+   * 一旦浏览器判定得偏一点，代价不是「少了个刷新圈」，而是整页触摸滚动全没。
+   * 已经删掉了。
+   *
+   * 这条测试防的是有人觉得「下拉刷新很烦」又把它加回来。
+   * ⚠️ 要加也只许加在**具体的滚动容器**上（比如弹层里那个 div），
+   * 不许作用在 html / body / #root 这种整页级别。
+   */
+  const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+
+  /** 去掉注释，避免注释里提到这些词就误判 */
+  function cssWithoutComments(): string {
+    return css.replace(/\/\*[\s\S]*?\*\//g, '')
+  }
+
+  it('没有 html / body / #root 级别的 overscroll-behavior 拦截', () => {
+    const code = cssWithoutComments()
+    // 逐条声明看它落在哪个选择器里
+    const offenders: string[] = []
+    for (const match of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const [, selector = '', block = ''] = match
+      if (!/overscroll-behavior/.test(block)) continue
+      if (/\b(body|html|#root)\b/.test(selector)) {
+        offenders.push(`${selector.trim()} { ${block.trim().replace(/\s+/g, ' ')} }`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('没有任何 touch-action / user-select: none 之类的全局触摸禁用', () => {
+    const code = cssWithoutComments()
+    const offenders: string[] = []
+    for (const match of code.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const [, selector = '', block = ''] = match
+      const isGlobal = /^\s*(html|body|#root|\*)\s*(,|$)/.test(selector)
+      if (!isGlobal) continue
+      if (/touch-action\s*:\s*none|pointer-events\s*:\s*none/.test(block)) {
+        offenders.push(`${selector.trim()} { ${block.trim().replace(/\s+/g, ' ')} }`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('overflow-x: hidden 是允许的（横轴，管不到竖着划）', () => {
+    // 反过来确认：这条测试不是「什么都不许写」，横轴溢出该拦还得拦
+    const code = cssWithoutComments()
+    expect(code).toMatch(/overflow-x:\s*hidden/)
+  })
+})
