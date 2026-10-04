@@ -87,11 +87,23 @@ export function exportFileName(localDate: string): string {
   return `一刻-${localDate}.json`
 }
 
+/** 导出失败时抛这个，调用方好区分「能不能导出」与「导出炸了」 */
+export class ExportUnsupportedError extends Error {
+  constructor() {
+    super('当前环境不支持导出文件')
+    this.name = 'ExportUnsupportedError'
+  }
+}
+
 /**
  * 触发浏览器下载。
  *
- * `URL.revokeObjectURL` 必须延迟调用：立刻revoke 会让部分浏览器
+ * `URL.revokeObjectURL` 必须延迟调用：立刻 revoke 会让部分浏览器
  * （尤其是移动端 Safari）来不及把 blob 读完，表现为「点了没反应」。
+ *
+ * ⚠️ **不要用 `'download' in document.createElement('a')` 判断支持性** ——
+ * 所有现代浏览器都有这个属性，包括**不支持下载的 iOS Safari**。
+ * 这个属性判断恒为真，等于没判。要判就判用户是不是触摸设备（见下）。
  */
 export function downloadJson(fileName: string, content: string): void {
   const blob = new Blob([content], { type: 'application/json' })
@@ -103,4 +115,58 @@ export function downloadJson(fileName: string, content: string): void {
   link.click()
   link.remove()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/**
+ * 这台设备点「下载链接」会不会真的把文件存下来。
+ *
+ * iOS / iPadOS 的 Safari 与所有 iOS 浏览器（内核必须是 WebKit）**不支持
+ * `<a download>`** —— 点了会当普通链接打开，要么弹出一个空白页，要么什么都不发生。
+ * 而 `'download' in a` 那种属性检测**在 iOS 上也是 true**，检测不出来，
+ * 只能按「是不是触摸设备」来判断。
+ *
+ * 台式机触摸屏（Windows 的触屏本）会被误判成手机 —— 代价只是多出一个
+ * 「复制 JSON」按钮，点错了也没损失，比「点下载没反应」好得多。
+ */
+export function canDownloadFile(): boolean {
+  if (typeof window === 'undefined') return false
+  return !window.matchMedia('(pointer: coarse)').matches
+}
+
+/** 复制到剪贴板。返回是否成功 —— 失败时调用方要给出「手动长按复制」的退路。 */
+export async function copyToClipboard(text: string): Promise<boolean> {
+  // 优先用 Clipboard API；它在 https 与 localhost 下可用，
+  // 但在某些内嵌浏览器里会直接抛错，所以失败了要继续试老办法。
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // 落到下面的兜底
+    }
+  }
+
+  // 兜底：老式的「临时 textarea + document.execCommand('copy')」。
+  // execCommand 已被标记废弃，但它是唯一在不支持 Clipboard API 的环境里
+  // 还能用的办法，移动端尤其需要。所以这里就地关掉那条 deprecated 的告警。
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    // 必须留在视口里（只是移出屏幕外也会导致 iOS 选不中），
+    // 用透明 + 不可见来藏，而不是挪到 -9999px。
+    area.style.position = 'fixed'
+    area.style.top = '0'
+    area.style.left = '0'
+    area.style.opacity = '0'
+    area.setAttribute('readonly', '')
+    document.body.appendChild(area)
+    area.select()
+    area.setSelectionRange(0, text.length)
+    // oxlint-disable-next-line @typescript-eslint/no-deprecated
+    const ok = document.execCommand('copy')
+    area.remove()
+    return ok
+  } catch {
+    return false
+  }
 }

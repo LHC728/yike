@@ -4,7 +4,7 @@ import { expect, test, type Page } from '@playwright/test'
  * 端到端测试（方案 §77）。
  *
  * 覆盖浏览器层面的 Test 1 / 2 / 13，以及导航、日历归档、搜索、删除确认、
- * 导出、PWA 离线外壳（Service Worker 生效后断网重开仍然可用）。
+ * 导出（电脑下载 / 手机复制两种形态）、PWA 离线外壳（Service Worker 生效后断网重开仍然可用）。
  *
  * 全部在本机模式下运行：不依赖任何云服务，正好验证「Local First」。
  */
@@ -344,6 +344,10 @@ test.describe('同步状态可见（§65）', () => {
 })
 
 test.describe('导出全部记录', () => {
+  // 只跑桌面：这里测的是**下载**那条路。手机上给的是复制按钮
+  // （iOS Safari 不支持 <a download>），由下面「手机：导出改成复制」覆盖。
+  test.skip(({ isMobile }) => Boolean(isMobile), '下载形态只在桌面下有意义')
+
   test('点导出能下载出一个含所有记录的 JSON 文件', async ({ page }) => {
     await openApp(page)
     await capture(page, '导出一条灵感', 'idea')
@@ -377,6 +381,42 @@ test.describe('导出全部记录', () => {
     await openApp(page)
     await page.getByTestId('open-settings').click()
     await expect(page.getByTestId('settings-export')).toBeDisabled()
+  })
+})
+
+/**
+ * 手机上的导出形态。
+ *
+ * 手机**不给下载按钮** —— iOS 的 Safari 不支持 `<a download>`，点了不会存文件。
+ * 改成复制 JSON，用户粘到备忘录里就是一份底稿。
+ * 这组用例钉住「手机上出现的是复制按钮、不是下载按钮」。
+ */
+test.describe('手机：导出改成复制', () => {
+  // 只跑手机形态：桌面形态走的是下载那条路（上面那组用例覆盖）
+  test.skip(({ isMobile }) => !isMobile, '只在手机形态下有意义')
+
+  test('手机上给的是复制按钮，点了会有反馈', async ({ page }) => {
+    await openApp(page)
+    await capture(page, '手机上导出一条', 'idea')
+    await page.getByTestId('open-settings').click()
+
+    // 关键：不该出现下载按钮
+    await expect(page.getByTestId('settings-export')).toHaveCount(0)
+    const copyButton = page.getByTestId('settings-copy-export')
+    await expect(copyButton).toBeVisible()
+    await expect(copyButton).toBeEnabled()
+
+    // 真点一下：无头浏览器里可能复制失败，但**不能什么都不发生** ——
+    // 按钮文案或提示语必须给出下一步，不能让用户对着没反应的按钮发呆。
+    await copyButton.click()
+    await expect(page.getByTestId('settings-export-hint')).not.toBeEmpty()
+    await expect(copyButton).not.toBeEmpty()
+  })
+
+  test('手机上没有记录时复制按钮是禁用的', async ({ page }) => {
+    await openApp(page)
+    await page.getByTestId('open-settings').click()
+    await expect(page.getByTestId('settings-copy-export')).toBeDisabled()
   })
 })
 

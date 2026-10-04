@@ -18,7 +18,7 @@ import { CloudRequestError } from '../cloud/cloudflareClient'
 import { resetSupabaseClient } from '../cloud/supabaseClient'
 import { THEME_OPTIONS, themeActions, useThemeMode } from '../app/themeStore'
 import { formatChineseDateTime, localDateOf } from '../utils/time'
-import { buildExportFile, downloadJson, exportFileName } from '../utils/exportRecords'
+import { buildExportFile, canDownloadFile, copyToClipboard, downloadJson, exportFileName } from '../utils/exportRecords'
 import { uiActions } from '../app/uiStore'
 import { Modal } from './Modal'
 
@@ -62,6 +62,11 @@ export function SettingsSheet({ open, userId }: SettingsSheetProps) {
   // （这台设备自己的事）不在一个层级，所以拆成二级页，主设置只留一行入口。
   // 每次打开由调用方的 key 重新挂载，这个 state 会自动回到 'main'。
   const [view, setView] = useState<'main' | 'cloud'>('main')
+
+  // 「导出」按钮的两种形态。手机点「下载链接」不会有任何反应（iOS 根本不支持
+  // `<a download>`），所以触摸设备上改成「复制 JSON」，复制到剪贴板再自己粘出来。
+  const [canDownload] = useState(canDownloadFile)
+  const [exportState, setExportState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   if (!open) return null
 
@@ -126,13 +131,28 @@ export function SettingsSheet({ open, userId }: SettingsSheetProps) {
     uiActions.closeSettings()
   }
 
-  function handleExport() {
-    // 导出的是 useAllRecords（本机 IndexedDB 全量，含软删墓碑），
-    // 不是当前页面的过滤结果 —— 备份要的是完整，不是「看得见的那些」。
+  /** 导出内容：本机 IndexedDB 全量（含软删墓碑），不是当前页面的过滤结果 */
+  function buildExportText(): string {
+    // 备份要的是完整，不是「看得见的那些」。
     const now = new Date()
     const file = buildExportFile(records, now.toISOString())
+    return JSON.stringify(file, null, 2)
+  }
+
+  function handleExport() {
     // 文件名用本地日期：用户一眼能对上「这是我哪天导的」
-    downloadJson(exportFileName(localDateOf(now)), JSON.stringify(file, null, 2))
+    downloadJson(exportFileName(localDateOf(new Date())), buildExportText())
+  }
+
+  /**
+   * 手机上的导出：复制到剪贴板。
+   *
+   * 不是偷懒 —— iOS 的 Safari **不支持 `<a download>`**，点了不会存文件。
+   * 复制至少真的拿得到东西，用户粘到备忘录/微信里就是一份底稿。
+   */
+  async function handleCopyExport() {
+    const ok = await copyToClipboard(buildExportText())
+    setExportState(ok ? 'copied' : 'failed')
   }
 
   const isCloud = view === 'cloud'
@@ -244,18 +264,35 @@ export function SettingsSheet({ open, userId }: SettingsSheetProps) {
             ) : null}
 
             {/* 导出：这是用户自己手里的完整底稿，跟「待同步 / 本机记录」
-                是一组信息（都是「我有多少数据」），所以放在同一个区块里。 */}
-            <button
-              type="button"
-              disabled={records.length === 0}
-              onClick={handleExport}
-              data-testid="settings-export"
-              className="tap tap-active mt-2 h-10 rounded-xl border border-line px-3.5 text-[14px] text-ink-soft disabled:opacity-50"
-            >
-              导出全部记录
-            </button>
-            <p className="mt-2 text-[12px] leading-5 text-ink-soft">
-              存成一份 JSON 文件（含已删除的）。留个底稿，或者拿去别处分析。
+                是一组信息（都是「我有多少数据」），所以放在同一个区块里。
+                手机与电脑给的按钮不一样，原因见 canDownloadFile 的注释。 */}
+            {canDownload ? (
+              <button
+                type="button"
+                disabled={records.length === 0}
+                onClick={handleExport}
+                data-testid="settings-export"
+                className="tap tap-active mt-2 h-10 rounded-xl border border-line px-3.5 text-[14px] text-ink-soft disabled:opacity-50"
+              >
+                导出全部记录
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={records.length === 0}
+                onClick={() => void handleCopyExport()}
+                data-testid="settings-copy-export"
+                className="tap tap-active mt-2 h-10 rounded-xl border border-line px-3.5 text-[14px] text-ink-soft disabled:opacity-50"
+              >
+                {exportState === 'idle' ? '复制全部记录' : '已复制，去粘贴保存'}
+              </button>
+            )}
+            <p className="mt-2 text-[12px] leading-5 text-ink-soft" data-testid="settings-export-hint">
+              {exportState === 'failed'
+                ? '复制没成功。可以先随便找个输入框，再试试上面的按钮。'
+                : canDownload
+                  ? '存成一份 JSON 文件（含已删除的）。留个底稿，或者拿去别处分析。'
+                  : '手机存不了文件，这里改成复制成 JSON（含已删除的）。粘到备忘录里就是一份底稿。'}
             </p>
           </section>
 

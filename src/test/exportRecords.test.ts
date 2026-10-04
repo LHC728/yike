@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { LocalRecord } from '../domain/record'
-import { buildExportFile, EXPORT_SCHEMA_VERSION, exportFileName } from '../utils/exportRecords'
+import { buildExportFile, canDownloadFile, copyToClipboard, EXPORT_SCHEMA_VERSION, exportFileName } from '../utils/exportRecords'
 
 function makeRecord(overrides: Partial<LocalRecord> = {}): LocalRecord {
   return {
@@ -129,5 +129,56 @@ describe('导出全部记录', () => {
 
   it('文件名带本地日期', () => {
     expect(exportFileName('2026-10-04')).toBe('一刻-2026-10-04.json')
+  })
+})
+
+/**
+ * 手机上的导出形态。
+ *
+ * 这一段防的是一个**看起来很像在防护、其实恒为真**的检测：
+ * `'download' in document.createElement('a')` —— 所有现代浏览器都有这个属性，
+ * 连**不支持 `<a download>` 的 iOS Safari 也有**，所以永远判不出「不能下载」。
+ * 只能按「是不是触摸设备」判断。别再把这套换成属性检测。
+ */
+describe('导出形态按设备分流', () => {
+  function withPointer(coarse: boolean) {
+    const original = window.matchMedia
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes('pointer: coarse') ? coarse : false,
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia
+    return () => {
+      window.matchMedia = original
+    }
+  }
+
+  it('鼠标设备（fine）可以下载文件', () => {
+    const restore = withPointer(false)
+    try {
+      expect(canDownloadFile()).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  it('触摸设备（coarse）不能下载 —— 手机走复制的分支', () => {
+    const restore = withPointer(true)
+    try {
+      expect(canDownloadFile()).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('复制失败不抛异常，只返回 false', async () => {
+    // jsdom 里既没有 navigator.clipboard，execCommand 也是 undefined，
+    // 正好覆盖「两条路都走不通」的情况
+    await expect(copyToClipboard('{}')).resolves.toBe(false)
   })
 })
