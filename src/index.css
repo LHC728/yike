@@ -1,11 +1,27 @@
 @import 'tailwindcss';
 
-/* ⚠️ Tailwind 的 preflight（在 `tailwindcss/index.css` 的 `@layer base` 里，
-   **不是**那个单独的 preflight.css 文件）会给 `html, :host` 加一句
-   `-webkit-text-size-adjust: 100%`。它会在 iOS 上参与「文本自动缩放」的判定，
-   有干扰单指触摸滚动识别的风险 —— 详见文件里 `html {}` 附近的说明。
-   这里用 `!important` 把它压掉：**这是唯一一处、也是特意为之**的 important。
-   不要再往别处加 important。 */
+/* ⚠️⚠️ **这一条修的是真机上「单指划不动、要先双指缩放一下才能划」的 bug ——
+   别再改回 100%，也别删。**（安卓真机验证过，改完即好。）
+
+   起因：Tailwind 的 preflight（在 `tailwindcss/index.css` 的 `@layer base` 里，
+   **不是**那个单独的 `preflight.css` 文件 —— 那个文件是另一个东西）会给
+   `html, :host` 加一句 `-webkit-text-size-adjust: 100%`。
+
+   为什么它会把人害惨：这个属性管的是**手机的文字膨胀**（font inflation）——
+   手机为了把「为宽屏设计的网页」塞进小屏，会把字自动放大。它本身没问题，
+   但在**安卓上它默认是 `auto`（支持膨胀）**，一旦开启膨胀，就会干扰
+   **单指手势的识别**，表现就是「单指滑不动，先双指缩放一下才能滑」。
+
+   ⚠️ **为什么本地永远测不出来**：MDN 的初始值写的是
+   「`auto` for smartphone browsers supporting inflation, `none` in other cases
+   （**and then not modifiable**）」。安卓手机浏览器支持膨胀 → 默认 `auto` → 属性可改，
+   所以它是**安卓专属**的问题；而 Chromium 桌面 / Playwright 不膨胀 →
+   初始值就是 `none` 且**不可修改**，连 inline 写进去都读回 `100%`。
+   **所以这个 bug 只能在真机复现，在测试环境里怎么试都复现不了。**
+   以后遇到「本地正常、真机不对」且跟触摸有关的，先怀疑它。
+
+   这里用 `!important` 压掉 preflight：**这是本项目唯一一处 important，
+   特意为之**。不要再往别处加 important。 */
 html {
   -webkit-text-size-adjust: none !important;
   text-size-adjust: none !important;
@@ -156,20 +172,12 @@ html {
     color-scheme: light;
   }
 
-  /* ⚠️ 这里**不要**再写 `-webkit-text-size-adjust: 100%` / `text-size-adjust: 100%`。
+  /* ⚠️ 这里**不要**再写 `-webkit-text-size-adjust` / `text-size-adjust`。
+     正确的设值在文件开头 `html {}` 那一段（`none !important`），
+     那里写清了完整的原因与「为什么本地测不出来」。
 
-     它原本是为了防「横竖屏切换时字体被自动放大」。但我们自己定义了断点
-     （`--breakpoint-md: 1120px`），字号被轻微改变并不致命；而这个属性在
-     iOS 上有**副作用**：它会参与「文本自动缩放」的判定，在 <meta viewport>
-     里同时有 `width=device-width` 与 `initial-scale=1.0` 时行为未明确定义，
-     个别 iOS 版本上会干扰单指触摸滚动的识别 —— 表现就是「手指滑不动页面」。
-
-     也就是说，它防的是一个小麻烦，代价可能是整个页面划不动，
-     而这个风险已经被真实反馈触发过一次。不值得，直接不要了。
-
-     顺带：`body` 的 `font-size: 15px` 也**不能当成定值依赖** ——
-     iOS 的文本自动缩放可能把它放大。但项目里几乎所有文字都写了显式
-     的 `text-[Npx]`，所以整体是稳的，不用为它加限制。 */
+     一句话版本：它管的是手机的文字膨胀，开启膨胀会干扰单指手势识别，
+     真机上表现为「单指滑不动、要先双指缩放才能划」。**安卓真机验证过。** */
 
   body {
     margin: 0;
