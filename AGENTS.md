@@ -246,6 +246,18 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 请用 `npm install --ignore-scripts --prefix <临时目录> wrangler@4` 再跑它的
 `bin/wrangler.js`。
 
+### 改坏了怎么退回去
+
+存档点（tag）：`v1.0.1-baseline`（单测 331 的稳定基线）、`v1.0.0-pre-projects`。
+
+**首选方法 A**（只换文件、不动历史）：
+`git checkout v1.0.1-baseline -- .` → 确认 → 重新提交。后悔了用 `git checkout HEAD -- .` 撤回。
+
+⚠️ **改代码前先确认工作区干净**，否则回退会无声抹掉未提交的改动。
+⚠️ **代码能退，数据库迁移不能退**（`worker/migrations/` 只能前进）。
+退代码前先确认旧代码认不认识当前表结构。
+详细说明见 `README.md` 的「回退版本」一节。
+
 ---
 
 ## 七、云端后端现状
