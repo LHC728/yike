@@ -1,0 +1,248 @@
+{
+  "engine": "@electric-sql/pglite@0.5.8 / PostgreSQL 18.3",
+  "userId": "11111111-1111-4111-8111-111111111111",
+  "projectId": "33333333-3333-4333-8333-333333333333",
+  "logId": "44444444-4444-4444-8444-444444444444",
+  "cases": [
+    {
+      "label": "project_create_progress_zero",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "42ae9381-ac9b-45ce-9d17-e749ad5b64d1",
+        "recordId": "33333333-3333-4333-8333-333333333333",
+        "operation": "create",
+        "expectedVersion": null,
+        "payload": {
+          "type": "project",
+          "content": "真实PG大事",
+          "progress": 0,
+          "deadlineLocalDate": "2026-12-31",
+          "createdAtUtc": "2026-10-01T01:02:03.123456+00:00",
+          "createdLocalDate": "2026-10-01",
+          "createdTimezone": "Asia/Shanghai",
+          "updatedAtUtc": "2026-10-01T01:02:03.123456+00:00",
+          "updatedTimezone": "Asia/Shanghai"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "type": "project",
+          "content": "真实PG大事",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 1,
+          "progress": 0,
+          "parent_id": null,
+          "created_at_utc": "2026-10-01T01:02:03.123456+00:00",
+          "deleted_at_utc": null,
+          "updated_at_utc": "2026-10-01T01:02:03.123456+00:00",
+          "completed_at_utc": null,
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.14+00:00",
+          "completed_timezone": null,
+          "created_local_date": "2026-10-01",
+          "deadline_local_date": "2026-12-31"
+        },
+        "status": "applied",
+        "version": 1
+      }
+    },
+    {
+      "label": "log_create_progress_zero_parent",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "c4782389-004a-441d-b91e-0536c50f4994",
+        "recordId": "44444444-4444-4444-8444-444444444444",
+        "operation": "create",
+        "expectedVersion": null,
+        "payload": {
+          "type": "log",
+          "content": "真实PG进展",
+          "parentId": "33333333-3333-4333-8333-333333333333",
+          "progress": 0,
+          "createdAtUtc": "2026-10-02T01:02:03.123456+00:00",
+          "createdLocalDate": "2026-10-02",
+          "createdTimezone": "Asia/Shanghai",
+          "updatedAtUtc": "2026-10-02T01:02:03.123456+00:00",
+          "updatedTimezone": "Asia/Shanghai"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "type": "log",
+          "content": "真实PG进展",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 1,
+          "progress": 0,
+          "parent_id": "33333333-3333-4333-8333-333333333333",
+          "created_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "deleted_at_utc": null,
+          "updated_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "completed_at_utc": null,
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.172+00:00",
+          "completed_timezone": null,
+          "created_local_date": "2026-10-02",
+          "deadline_local_date": null
+        },
+        "status": "applied",
+        "version": 1
+      }
+    },
+    {
+      "label": "log_complete_with_timezone",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "cd24be0a-8dfc-4176-8a42-b14a40792a6a",
+        "recordId": "44444444-4444-4444-8444-444444444444",
+        "operation": "update",
+        "expectedVersion": 1,
+        "payload": {
+          "content": "已完成进展",
+          "progress": 0,
+          "updatedAtUtc": "2026-10-03T00:00:00.654321+00:00",
+          "updatedTimezone": "Asia/Shanghai",
+          "completedAtUtc": "2026-10-03T00:00:00.654321+00:00",
+          "completedTimezone": "Asia/Shanghai"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "type": "log",
+          "content": "已完成进展",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 2,
+          "progress": 0,
+          "parent_id": "33333333-3333-4333-8333-333333333333",
+          "created_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "deleted_at_utc": null,
+          "updated_at_utc": "2026-10-03T00:00:00.654321+00:00",
+          "completed_at_utc": "2026-10-03T00:00:00.654321+00:00",
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.189+00:00",
+          "completed_timezone": "Asia/Shanghai",
+          "created_local_date": "2026-10-02",
+          "deadline_local_date": null
+        },
+        "status": "applied",
+        "version": 2
+      }
+    },
+    {
+      "label": "log_soft_delete",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "2971d30a-417b-4f84-bdba-08bd4527e575",
+        "recordId": "44444444-4444-4444-8444-444444444444",
+        "operation": "delete",
+        "expectedVersion": 2,
+        "payload": {
+          "updatedAtUtc": "2026-10-04T00:00:00.000001+00:00",
+          "updatedTimezone": "Asia/Shanghai",
+          "deletedAtUtc": "2026-10-04T00:00:00.000001+00:00"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "type": "log",
+          "content": "已完成进展",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 3,
+          "progress": 0,
+          "parent_id": "33333333-3333-4333-8333-333333333333",
+          "created_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "deleted_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "updated_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "completed_at_utc": "2026-10-03T00:00:00.654321+00:00",
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.193+00:00",
+          "completed_timezone": "Asia/Shanghai",
+          "created_local_date": "2026-10-02",
+          "deadline_local_date": null
+        },
+        "status": "applied",
+        "version": 3
+      }
+    },
+    {
+      "label": "log_old_mutation_already_applied_latest_row",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "c4782389-004a-441d-b91e-0536c50f4994",
+        "recordId": "44444444-4444-4444-8444-444444444444",
+        "operation": "create",
+        "expectedVersion": null,
+        "payload": {
+          "createdAtUtc": "invalid",
+          "createdTimezone": "invalid/zone"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "type": "log",
+          "content": "已完成进展",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 3,
+          "progress": 0,
+          "parent_id": "33333333-3333-4333-8333-333333333333",
+          "created_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "deleted_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "updated_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "completed_at_utc": "2026-10-03T00:00:00.654321+00:00",
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.193+00:00",
+          "completed_timezone": "Asia/Shanghai",
+          "created_local_date": "2026-10-02",
+          "deadline_local_date": null
+        },
+        "status": "already_applied",
+        "version": 3
+      }
+    },
+    {
+      "label": "log_stale_version_conflict",
+      "request": {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "mutationId": "73155446-f1d9-41ee-b24c-82c5eb77ef9a",
+        "recordId": "44444444-4444-4444-8444-444444444444",
+        "operation": "update",
+        "expectedVersion": 1,
+        "payload": {
+          "content": "未覆盖现值"
+        }
+      },
+      "body": {
+        "record": {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "type": "log",
+          "content": "已完成进展",
+          "user_id": "11111111-1111-4111-8111-111111111111",
+          "version": 3,
+          "progress": 0,
+          "parent_id": "33333333-3333-4333-8333-333333333333",
+          "created_at_utc": "2026-10-02T01:02:03.123456+00:00",
+          "deleted_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "updated_at_utc": "2026-10-04T00:00:00.000001+00:00",
+          "completed_at_utc": "2026-10-03T00:00:00.654321+00:00",
+          "created_timezone": "Asia/Shanghai",
+          "updated_timezone": "Asia/Shanghai",
+          "server_updated_at": "2026-10-06T07:47:26.193+00:00",
+          "completed_timezone": "Asia/Shanghai",
+          "created_local_date": "2026-10-02",
+          "deadline_local_date": null
+        },
+        "status": "version_conflict",
+        "version": 3
+      }
+    }
+  ]
+}

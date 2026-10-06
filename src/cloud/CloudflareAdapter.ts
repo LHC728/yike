@@ -12,6 +12,8 @@ import { clampDeadlineLocalDate, clampParentId, clampProgress, clampRecordType }
 import type { ApplyMutationParams, ApplyMutationResult, CloudAdapter } from './CloudAdapter'
 import { SessionChangedError, type SessionScope } from './sessionScope'
 import { cfRequest, getCloudflareClient, type CloudflareClient } from './cloudflareClient'
+import { decodeMutationResponse } from './mutationResponse'
+import { decodeCloudRecordList, decodeCloudRecordResponse, InvalidCloudRecordResponseError } from './recordResponse'
 
 type Row = Record<string, unknown>
 
@@ -100,27 +102,25 @@ export class CloudflareAdapter implements CloudAdapter {
 
   /** 服务端仍从令牌识别身份；客户端账号校验只负责防止混用会话。 */
   async pullAll(userId: string): Promise<CloudRecord[]> {
-    const data = await cfRequest<{ records?: Row[] }>('/api/sync/pull', { method: 'POST', ...this.requestOptions(userId) })
+    const data = await cfRequest<unknown>('/api/sync/pull', { method: 'POST', ...this.requestOptions(userId) })
     this.checkResponse()
-    const rows = data.records ?? []
-    return rows.map(toCloud)
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new InvalidCloudRecordResponseError()
+    return decodeCloudRecordList((data as Row)['records'], 'camel', toCloud, userId)
   }
 
   async pullOne(userId: string, recordId: string): Promise<CloudRecord | null> {
-    const data = await cfRequest<{ record?: Row | null }>(
+    const data = await cfRequest<unknown>(
       `/api/sync/record?id=${encodeURIComponent(recordId)}`,
       this.requestOptions(userId),
     )
     this.checkResponse()
-    return data.record ? toCloud(data.record) : null
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new InvalidCloudRecordResponseError()
+    const record = (data as Row)['record']
+    return record === null ? null : decodeCloudRecordResponse(record, 'camel', toCloud, userId, recordId)
   }
 
   async applyMutation(userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
-    const data = await cfRequest<{
-      status?: string
-      version?: number | string | null
-      record?: Row | null
-    }>('/api/sync/mutate', {
+    const data = await cfRequest<unknown>('/api/sync/mutate', {
       ...this.requestOptions(userId),
       method: 'POST',
       body: {
@@ -133,19 +133,7 @@ export class CloudflareAdapter implements CloudAdapter {
     })
 
     this.checkResponse()
-    const status =
-      data.status === 'already_applied' ||
-      data.status === 'version_conflict' ||
-      data.status === 'record_not_found'
-        ? data.status
-        : 'applied'
-
-    return {
-      status,
-      version:
-        data.version === null || data.version === undefined ? null : Number(data.version),
-      record: data.record ? toCloud(data.record) : null,
-    }
+    return decodeMutationResponse(data, toCloud, userId, params.recordId, 'camel')
   }
 
   /**

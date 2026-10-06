@@ -16,6 +16,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { readCloudConfig } from './cloudConfig'
 import { SessionChangedError, type SessionScope } from './sessionScope'
 import { createSessionSupabaseClient, getSupabaseClient } from './supabaseClient'
+import { decodeMutationResponse } from './mutationResponse'
+import { decodeCloudRecordList, decodeCloudRecordResponse } from './recordResponse'
 
 const COLUMNS = [
   'id',
@@ -134,8 +136,8 @@ export class SupabaseAdapter implements CloudAdapter {
 
       this.checkResponse()
       if (error) throw new Error(error.message)
-      const rows = (data ?? []) as unknown as Row[]
-      for (const row of rows) result.push(toCloud(row))
+      const rows = decodeCloudRecordList(data, 'snake', toCloud, userId)
+      result.push(...rows)
       if (rows.length < PAGE_SIZE) break
     }
 
@@ -152,8 +154,8 @@ export class SupabaseAdapter implements CloudAdapter {
       .maybeSingle()
     this.checkResponse()
     if (error) throw new Error(error.message)
-    if (!data) return null
-    return toCloud(data as unknown as Row)
+    if (data === null) return null
+    return decodeCloudRecordResponse(data, 'snake', toCloud, userId, recordId)
   }
 
   async applyMutation(userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
@@ -169,24 +171,7 @@ export class SupabaseAdapter implements CloudAdapter {
     this.checkResponse()
     if (error) throw new Error(error.message)
 
-    const payload = (data ?? {}) as {
-      status?: string
-      version?: number | string | null
-      record?: Row | null
-    }
-
-    const status =
-      payload.status === 'already_applied' ||
-      payload.status === 'version_conflict' ||
-      payload.status === 'record_not_found'
-        ? payload.status
-        : 'applied'
-
-    return {
-      status,
-      version: payload.version === null || payload.version === undefined ? null : Number(payload.version),
-      record: payload.record ? toCloud(payload.record) : null,
-    }
+    return decodeMutationResponse(data, toCloud, userId, params.recordId, 'snake')
   }
 
   subscribe(userId: string, onChange: (recordId: string) => void): () => void {

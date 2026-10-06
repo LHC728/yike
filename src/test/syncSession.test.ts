@@ -234,7 +234,13 @@ it('Supabase 固定客户端真实发出的 RPC 保留 A 令牌，动态单例�
   const requests: string[] = []
   vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init: RequestInit) => {
     requests.push(new Headers(init.headers).get('authorization') ?? '')
-    return json({ status: 'applied', version: 1, record: null })
+    return json({ status: 'applied', version: 1, record: {
+      id: 'r', user_id: 'A', type: 'idea', content: 'A 私密', version: 1,
+      progress: null, deadline_local_date: null, parent_id: null,
+      created_at_utc: '2026-10-01T00:00:00.000Z', created_timezone: 'UTC', created_local_date: '2026-10-01',
+      updated_at_utc: '2026-10-01T00:00:00.000Z', updated_timezone: 'UTC',
+      completed_at_utc: null, completed_timezone: null, deleted_at_utc: null, server_updated_at: '2026-10-01T00:00:00.000Z',
+    } })
   }))
   const adapter = new SupabaseAdapter()
   const bound = await adapter.bindSession('A', { checkCurrent: () => undefined, signal: new AbortController().signal })

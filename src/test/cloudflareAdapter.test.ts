@@ -14,6 +14,7 @@ import { CloudflareAdapter, cloudflareAdapter } from '../cloud/CloudflareAdapter
 import { CloudRequestError } from '../cloud/cloudflareClient'
 import { saveCloudConfig } from '../cloud/cloudConfig'
 import { saveCloudflareSession } from '../cloud/cloudflareSession'
+import { clampDeadlineLocalDate, clampProgress, clampRecordType } from '../domain/record'
 
 const WORKER_URL = 'https://yike-sync.example.workers.dev'
 const TOKEN = 'token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -46,6 +47,17 @@ function stubFetch(payload: unknown, init: { status?: number } = {}): FetchMock 
   const mock: FetchMock = vi.fn(async () => new Response(JSON.stringify(payload), { status }))
   vi.stubGlobal('fetch', mock)
   return mock
+}
+
+function validRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'r-1', userId: 'user-a', type: 'idea', content: '原文', version: 1,
+    progress: null, deadlineLocalDate: null, parentId: null,
+    createdAtUtc: '2026-10-01T00:00:00.000Z', createdTimezone: 'UTC', createdLocalDate: '2026-10-01',
+    updatedAtUtc: '2026-10-01T00:00:00.000Z', updatedTimezone: 'UTC',
+    completedAtUtc: null, completedTimezone: null, deletedAtUtc: null, serverUpdatedAt: '2026-10-01T00:00:00.000Z',
+    ...overrides,
+  }
 }
 
 // =====================================================================
@@ -162,7 +174,11 @@ describe('pullAll 的字段归一', () => {
     // 关键：必须是 null 而不是 undefined。
     // snapshotEquals 用的是严格相等，undefined ≠ null 会在下一次同步时
     // 凭空造出一个「删除冲突」弹窗（Dexie v2 / v3 迁移存在的全部理由）。
-    stubFetch({ records: [{ id: 'r-1', type: 'idea', version: 1 }] })
+    const legacy = validRecord()
+    delete legacy['progress']
+    delete legacy['deadlineLocalDate']
+    delete legacy['parentId']
+    stubFetch({ records: [legacy] })
     const [record] = await adapter.pullAll('user-a')
     expect(record?.progress).toBeNull()
     expect(record?.deadlineLocalDate).toBeNull()
@@ -173,8 +189,8 @@ describe('pullAll 的字段归一', () => {
   it('进展：parentId 原样透出，空字符串当「没有父级」', async () => {
     stubFetch({
       records: [
-        { id: 'r-log', type: 'log', version: 1, progress: 50, parentId: 'p-1' },
-        { id: 'r-bad', type: 'log', version: 1, parentId: '' },
+        validRecord({ id: 'r-log', type: 'log', progress: 50, parentId: 'p-1' }),
+        validRecord({ id: 'r-bad', type: 'log', parentId: '' }),
       ],
     })
     const [log, bad] = await adapter.pullAll('user-a')
@@ -184,21 +200,21 @@ describe('pullAll 的字段归一', () => {
     expect(bad?.parentId).toBeNull()
   })
 
-  it('越界的进度与畸形的截止日在入口被收敛掉', async () => {
+  it('叶子函数仍能收敛脏进度与日期，网络接口拒绝把脏记录当成完整事实', async () => {
     stubFetch({
       records: [
-        { id: 'r-1', type: 'project', version: 1, progress: 999, deadlineLocalDate: '2026-13-45' },
-        { id: 'r-2', type: 'project', version: 1, progress: 'abc', deadlineLocalDate: '' },
+        validRecord({ id: 'r-1', type: 'project', progress: 999, deadlineLocalDate: '2026-13-45' }),
+        validRecord({ id: 'r-2', type: 'project', progress: 'abc', deadlineLocalDate: '' }),
       ],
     })
-    const [first, second] = await adapter.pullAll('user-a')
-    expect(first?.progress).toBe(100) // 夹到 0–100
-    expect(first?.deadlineLocalDate).toBeNull() // 13 月 45 日不是真日期
-    expect(second?.progress).toBeNull()
-    expect(second?.deadlineLocalDate).toBeNull()
+    await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
+    expect(clampProgress(999)).toBe(100)
+    expect(clampDeadlineLocalDate('2026-13-45')).toBeNull()
+    expect(clampProgress('abc')).toBeNull()
+    expect(clampDeadlineLocalDate('')).toBeNull()
   })
 
-  it('字段缺失 / 类型不对时不抛异常，而是给出安全值', async () => {
+  it('字段缺失 / 类型不对的网络记录必须拒绝，叶子类型归一仍保留', async () => {
     stubFetch({
       records: [
         {
@@ -211,45 +227,33 @@ describe('pullAll 的字段归一', () => {
       ],
     })
 
-    const [record] = await adapter.pullAll('user-a')
-    expect(record).toBeDefined()
-    expect(record?.id).toBe('')
-    expect(record?.type).toBe('idea') // 只认 todo，其他一律 idea
-    expect(record?.content).toBe('')
-    expect(record?.version).toBe(1) // 非法版本号退回 1，不能是 NaN
-    expect(record?.createdTimezone).toBe('UTC')
-    expect(record?.updatedTimezone).toBe('UTC')
-    expect(record?.completedAtUtc).toBeNull()
-    expect(record?.deletedAtUtc).toBeNull()
-    // 绝不能出现 NaN —— 它会让后续的版本比较永远为 false
-    expect(Number.isNaN(record?.version)).toBe(false)
+    await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
+    expect(clampRecordType('garbage')).toBe('idea')
   })
 
-  it('空字符串的时间字段当成 null，不留下 "" 这种半吊子值', async () => {
+  it('网络回执的空字符串时间不是明确 null，不能静默清除已有完成或软删事实', async () => {
     stubFetch({
       records: [
-        { id: 'r-1', type: 'idea', completedAtUtc: '', completedTimezone: '', deletedAtUtc: '' },
+        validRecord({ completedAtUtc: '', completedTimezone: '', deletedAtUtc: '' }),
       ],
     })
-    const [record] = await adapter.pullAll('user-a')
-    expect(record?.completedAtUtc).toBeNull()
-    expect(record?.deletedAtUtc).toBeNull()
+    await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
   })
 
-  it('响应里没有 records 字段 → 空数组，而不是崩掉', async () => {
+  it('响应里没有 records 字段必须拒绝，不能伪装成完整空库', async () => {
     stubFetch({})
-    expect(await adapter.pullAll('user-a')).toEqual([])
+    await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
   })
 
-  it('records 是 null → 空数组', async () => {
+  it('records 是 null 必须拒绝，只有显式数组才是完整列表', async () => {
     stubFetch({ records: null })
-    expect(await adapter.pullAll('user-a')).toEqual([])
+    await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
   })
 })
 
 describe('pullOne', () => {
   it('有记录就返回，字段照样归一', async () => {
-    stubFetch({ record: { id: 'r-1', type: 'todo', version: 2 } })
+    stubFetch({ record: validRecord({ type: 'todo', version: 2 }) })
     const record = await adapter.pullOne('user-a', 'r-1')
     expect(record?.id).toBe('r-1')
     expect(record?.type).toBe('todo')
@@ -263,6 +267,13 @@ describe('pullOne', () => {
 })
 
 describe('applyMutation 的状态透传', () => {
+  const confirmedRecord = (version: number) => ({
+    id: 'r-1', userId: 'user-a', type: 'idea', content: 'x', version,
+    progress: null, deadlineLocalDate: null, parentId: null,
+    createdAtUtc: '2026-10-01T00:00:00.000Z', createdTimezone: 'UTC', createdLocalDate: '2026-10-01',
+    updatedAtUtc: '2026-10-01T00:00:00.000Z', updatedTimezone: 'UTC',
+    completedAtUtc: null, completedTimezone: null, deletedAtUtc: null, serverUpdatedAt: '2026-10-01T00:00:00.000Z',
+  })
   const params = {
     mutationId: 'm-1',
     recordId: 'r-1',
@@ -272,7 +283,7 @@ describe('applyMutation 的状态透传', () => {
   }
 
   it('把请求参数原样送到后端', async () => {
-    const mock = stubFetch({ status: 'applied', version: 1, record: null })
+    const mock = stubFetch({ status: 'applied', version: 1, record: confirmedRecord(1) })
     await adapter.applyMutation('user-a', params)
 
     const body = JSON.parse(String((mock.mock.calls[0]?.[1] as RequestInit | undefined)?.body)) as
@@ -288,31 +299,31 @@ describe('applyMutation 的状态透传', () => {
 
   for (const status of ['applied', 'already_applied', 'version_conflict', 'record_not_found'] as const) {
     it(`${status} 原样透传`, async () => {
-      stubFetch({ status, version: 2, record: null })
+      stubFetch(status === 'record_not_found'
+        ? { status, version: null, record: null }
+        : { status, version: 2, record: confirmedRecord(2) })
       const result = await adapter.applyMutation('user-a', params)
       expect(result.status).toBe(status)
-      expect(result.version).toBe(2)
+      expect(result.version).toBe(status === 'record_not_found' ? null : 2)
     })
   }
 
-  it('后端返回了没见过的 status → 保守当成 applied（只有后端明确说冲突才当冲突）', async () => {
+  it('后端返回了没见过的 status → 拒绝确认，不能静默删除本机队列', async () => {
     stubFetch({ status: 'weird_new_status', version: 1, record: null })
-    expect((await adapter.applyMutation('user-a', params)).status).toBe('applied')
+    await expect(adapter.applyMutation('user-a', params)).rejects.toThrow('cloud_invalid_mutation_response')
   })
 
   it('version 是字符串时转成数字，null 保持 null', async () => {
-    stubFetch({ status: 'applied', version: '7', record: null })
+    stubFetch({ status: 'applied', version: '7', record: confirmedRecord(7) })
     expect((await adapter.applyMutation('user-a', params)).version).toBe(7)
 
     stubFetch({ status: 'record_not_found', version: null, record: null })
     expect((await adapter.applyMutation('user-a', params)).version).toBeNull()
   })
 
-  it('record 存在时也归一', async () => {
-    stubFetch({ status: 'applied', version: 1, record: { id: 'r-1', type: 'garbage', version: 1 } })
-    const result = await adapter.applyMutation('user-a', params)
-    expect(result.record?.id).toBe('r-1')
-    expect(result.record?.type).toBe('idea')
+  it('确认记录类型不合法时不能把它归一成灵感并当成成功', async () => {
+    stubFetch({ status: 'applied', version: 1, record: { ...confirmedRecord(1), type: 'garbage' } })
+    await expect(adapter.applyMutation('user-a', params)).rejects.toThrow('cloud_invalid_mutation_response')
   })
 })
 
