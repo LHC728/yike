@@ -24,6 +24,7 @@ const COLUMNS = [
   'content',
   'progress',
   'deadline_local_date',
+  'parent_id',
   'created_at_utc',
   'created_timezone',
   'created_local_date',
