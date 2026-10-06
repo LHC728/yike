@@ -717,9 +717,8 @@ npm run build
 ## 测试
 
 ```bash
-npm run verify         # 类型检查 + Lint + 307 项单元 / 集成测试
+npm run verify         # 类型检查 + Lint + 全部单元 / 集成测试
 npm run test           # 只跑 Vitest
-npm run test:e2e       # Playwright：40 项 E2E（桌面 20 + 手机 20）
 npm run check:contrast # 配色对比度（WCAG AA，浅色 + 深色）
 ```
 
@@ -730,21 +729,28 @@ npm run check:contrast # 配色对比度（WCAG AA，浅色 + 深色）
 > （白字压在赭石主按钮上更是只有 3.28:1），两轮改版都没发现 ——
 > 十六进制字符串看不出对比度。
 
-E2E 跑的是构建产物，所以要先构建：
+E2E 跑的是 `dist/`，`test:e2e` 只运行 Playwright，**不会自动构建**。
+源码变化后先单独运行：
 
 ```bash
 npm run build
-npm run test:e2e
 ```
 
-如果 E2E 在收尾阶段卡住不动（Playwright 自行关闭 preview 服务时可能发生），
-先在另一个终端常驻服务，再跑测试 —— 配置里 `reuseExistingServer: true`
-会直接复用它，不再需要关闭：
+然后在终端 A 保持预览运行，避免部分 Windows 环境在 Playwright 自行关闭服务时卡住：
 
 ```bash
 npm run preview    # 终端 A，保持运行
-npm run test:e2e   # 终端 B
 ```
+
+在终端 B 跑桌面与手机 E2E，配置的 `reuseExistingServer: true` 会复用预览：
+
+```bash
+npm run test:e2e   # 终端 B，只运行测试
+```
+
+Windows 下不要把 build 与 E2E 用 `&&` 合并到一次工具调用：
+删除保护会按单次调用累计动作，可能触发 `SAFE_DELETE_BULK_GUARD_ERROR`。
+三步分开运行；测试数量以运行输出为准，审计修复的逐项证据见 `docs/审计修复日志-2026-10-06.md`。
 
 ### Vitest 覆盖（方案 §77）
 

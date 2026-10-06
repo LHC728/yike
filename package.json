@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "npm run build && playwright test",
+    "test:e2e": "playwright test",
     "verify": "tsc -b && oxlint --deny-warnings && vitest run",
     "check:base": "node scripts/check-base.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
