@@ -3,6 +3,7 @@ import type { AppDatabase } from '../db/db'
 import * as outboxRepository from '../db/outboxRepository'
 import { createRecord, completeTodo, updateContent } from '../db/recordRepository'
 import type { LocalRecord, RecordType } from '../domain/record'
+import { snapshotOf, snapshotOfCloud } from '../domain/record'
 import { mutationToParams } from '../cloud/CloudAdapter'
 import { pushPending, resetStaleSending } from '../sync/PushService'
 import { reconcileMany } from '../sync/ReconcileService'
@@ -264,6 +265,36 @@ describe('推送队列领取与压缩边界', () => {
     expect(server.rows.get(record.id)?.content).toBe('校时后的新正文')
     expect(server.rows.get(record.id)?.updatedAtUtc).toBe(correctedTime)
     expect((await database.records.get(record.id))?.createdAtUtc).toBe(CREATED_AT)
+    expect(await database.outbox.count()).toBe(0)
+  })
+})
+
+describe('云端缺记录时完整恢复', () => {
+  it.each(['project', 'log'] as const)('恢复 %s 不丢进度、截止日或所属大事', async (type) => {
+    const parent = type === 'log'
+      ? await createRecord({ userId: ACCOUNT, type: 'project', content: '所属大事', progress: 65, timezone: TZ })
+      : null
+    const record = await createRecord({
+      userId: ACCOUNT, type, content: '原始记录', progress: type === 'project' ? 65 : 40,
+      deadlineLocalDate: type === 'project' ? '2026-10-31' : null,
+      parentId: parent?.id ?? null, nowUtc: CREATED_AT, timezone: TZ,
+    })
+    await pushPending(server, ACCOUNT)
+    server.rows.delete(record.id)
+    await updateContent(record.id, '需要恢复的最新正文')
+    await pushPending(server, ACCOUNT)
+    const [recovery] = await database.outbox.where('recordId').equals(record.id).toArray()
+    expect(recovery?.operation).toBe('create')
+    expect(recovery?.payload.progress).toBe(record.progress)
+    expect(recovery?.payload.deadlineLocalDate).toBe(record.deadlineLocalDate)
+    expect(recovery?.payload.parentId).toBe(record.parentId)
+    await pushPending(server, ACCOUNT)
+    const remote = server.rows.get(record.id)
+    const local = await database.records.get(record.id)
+    if (!remote || !local) throw new Error('恢复记录缺失')
+    expect(snapshotOfCloud(remote)).toEqual(snapshotOf(local))
+    expect(remote.createdAtUtc).toBe(CREATED_AT)
+    expect(remote.content).toBe('需要恢复的最新正文')
     expect(await database.outbox.count()).toBe(0)
   })
 })

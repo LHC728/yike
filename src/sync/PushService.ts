@@ -15,7 +15,7 @@ import {
   removeMutation,
 } from '../db/outboxRepository'
 import { setServerVersion } from '../db/recordRepository'
-import type { Mutation } from '../domain/mutation'
+import { createPayloadOf, type Mutation } from '../domain/mutation'
 import { snapshotOf } from '../domain/record'
 import { uuidv4 } from '../utils/id'
 import { nowIso } from '../utils/time'
@@ -136,18 +136,7 @@ export async function promoteToCreate(recordId: string): Promise<boolean> {
       operation: 'create',
       baseServerVersion: null,
       baseSnapshot: { ...snapshotOf(record), content: '' },
-      payload: {
-        type: record.type,
-        content: record.content,
-        createdAtUtc: record.createdAtUtc,
-        createdTimezone: record.createdTimezone,
-        createdLocalDate: record.createdLocalDate,
-        updatedAtUtc: record.updatedAtUtc,
-        updatedTimezone: record.updatedTimezone,
-        completedAtUtc: record.completedAtUtc,
-        completedTimezone: record.completedTimezone,
-        deletedAtUtc: record.deletedAtUtc,
-      },
+      payload: createPayloadOf(record),
       createdAt: nowIso(),
       retryCount: 0,
       state: 'pending',

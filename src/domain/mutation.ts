@@ -36,6 +36,25 @@ export interface MutationPayload {
   deletedAtUtc?: string | null
 }
 
+/** 创建与灾后补传共用完整快照，避免新增字段只进普通创建、恢复时悄悄遗漏。 */
+export function createPayloadOf(record: RecordSnapshot): MutationPayload {
+  return {
+    type: record.type,
+    content: record.content,
+    progress: record.progress,
+    deadlineLocalDate: record.deadlineLocalDate,
+    parentId: record.parentId,
+    createdAtUtc: record.createdAtUtc,
+    createdTimezone: record.createdTimezone,
+    createdLocalDate: record.createdLocalDate,
+    updatedAtUtc: record.updatedAtUtc,
+    updatedTimezone: record.updatedTimezone,
+    completedAtUtc: record.completedAtUtc,
+    completedTimezone: record.completedTimezone,
+    deletedAtUtc: record.deletedAtUtc,
+  }
+}
+
 export interface Mutation {
   mutationId: string
   userId: string

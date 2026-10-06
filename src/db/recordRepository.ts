@@ -17,7 +17,7 @@ import type {
   SyncState,
 } from '../domain/record'
 import { snapshotOf, clampDeadlineLocalDate, clampParentId, clampProgress, PROGRESS_MIN } from '../domain/record'
-import type { Mutation, MutationOperation, MutationPayload } from '../domain/mutation'
+import { createPayloadOf, type Mutation, type MutationOperation, type MutationPayload } from '../domain/mutation'
 import { uuidv4 } from '../utils/id'
 import { captureNow } from '../utils/timezone'
 
@@ -98,21 +98,7 @@ export async function createRecord(input: CreateRecordInput): Promise<LocalRecor
     operation: 'create',
     baseServerVersion: null,
     baseSnapshot: { ...snapshotOf(record), content: '' },
-    payload: {
-      type: record.type,
-      content: record.content,
-      progress: record.progress,
-      deadlineLocalDate: record.deadlineLocalDate,
-      parentId: record.parentId,
-      createdAtUtc: record.createdAtUtc,
-      createdTimezone: record.createdTimezone,
-      createdLocalDate: record.createdLocalDate,
-      updatedAtUtc: record.updatedAtUtc,
-      updatedTimezone: record.updatedTimezone,
-      completedAtUtc: null,
-      completedTimezone: null,
-      deletedAtUtc: null,
-    },
+    payload: createPayloadOf(record),
     createdAt: captured.utc,
     retryCount: 0,
     state: 'pending',
@@ -437,21 +423,7 @@ export async function migrateLocalRecordsToUser(targetUserId: string): Promise<n
         operation: 'create',
         baseServerVersion: null,
         baseSnapshot: { ...snapshotOf(next), content: '' },
-        payload: {
-          type: next.type,
-          content: next.content,
-          progress: next.progress,
-          deadlineLocalDate: next.deadlineLocalDate,
-          parentId: next.parentId,
-          createdAtUtc: next.createdAtUtc,
-          createdTimezone: next.createdTimezone,
-          createdLocalDate: next.createdLocalDate,
-          updatedAtUtc: next.updatedAtUtc,
-          updatedTimezone: next.updatedTimezone,
-          completedAtUtc: next.completedAtUtc,
-          completedTimezone: next.completedTimezone,
-          deletedAtUtc: next.deletedAtUtc,
-        },
+        payload: createPayloadOf(next),
         createdAt: next.createdAtUtc,
         retryCount: 0,
         state: 'pending',
