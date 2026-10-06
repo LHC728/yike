@@ -228,11 +228,11 @@ export const recordActions = {
   updateContent(target: RecordWriteTarget, content: string, baseline: EditBaseline): Promise<RecordWriteResult> {
     return safeWrite(target, () => updateOwnedContent(target, content, () => isWriteOwnerCurrent(target), baseline))
   },
-  setProgress(target: RecordWriteTarget, progress: number): Promise<RecordWriteResult> {
-    return safeWrite(target, () => updateOwnedProgress(target, progress, () => isWriteOwnerCurrent(target)))
+  setProgress(target: RecordWriteTarget, progress: number, baseline: EditBaseline): Promise<RecordWriteResult> {
+    return safeWrite(target, () => updateOwnedProgress(target, progress, () => isWriteOwnerCurrent(target), baseline))
   },
-  finishProject(target: RecordWriteTarget): Promise<RecordWriteResult> {
-    return recordActions.setProgress(target, PROGRESS_MAX)
+  finishProject(target: RecordWriteTarget, baseline: EditBaseline): Promise<RecordWriteResult> {
+    return recordActions.setProgress(target, PROGRESS_MAX, baseline)
   },
   setDeadline(target: RecordWriteTarget, date: string | null): Promise<RecordWriteResult> {
     return safeWrite(target, () => updateOwnedDeadline(target, date, () => isWriteOwnerCurrent(target)))

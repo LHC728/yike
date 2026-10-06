@@ -20,6 +20,7 @@ interface OwnedChangeOptions {
   allowConflict?: boolean
   requireConflict?: boolean
   type?: RecordType
+  field?: 'content' | 'progress'
   baseline?: EditBaseline
 }
 
@@ -47,10 +48,10 @@ export async function runOwnedRecordWrite(
       if (conflict && conflict.userId !== target.userId) return { status: 'unavailable', reason: 'owner' }
       if (options.requireConflict && !conflict) return { status: 'unavailable', reason: 'missing' }
       if (!options.allowConflict && conflict) return { status: 'unavailable', reason: 'conflict' }
-      const { baseline } = options
-      // 同步版本相同也可能已有本机编辑；只核对正文及关系/删除状态，独立的进度等更新照常保留。
-      if (baseline && (
-        record.content !== baseline.content || record.deletedAtUtc !== baseline.deletedAtUtc ||
+      const { baseline, field } = options
+      // 同版本也可能已有本机编辑；只核对正在改的字段，不能误挡另一字段的独立更新。
+      if (baseline && field && (
+        record[field] !== baseline[field] || record.deletedAtUtc !== baseline.deletedAtUtc ||
         record.type !== baseline.type || record.parentId !== baseline.parentId
       )) return { status: 'stale', current: record }
       const before = snapshotOf(record)
@@ -91,12 +92,12 @@ export async function createOwnedRecord(
 }
 
 export function updateOwnedContent(target: RecordWriteTarget, content: string, current: ScopeCheck, baseline: EditBaseline): Promise<RecordWriteResult> {
-  return runOwnedRecordWrite(target, current, { baseline }, () => updateContent(target.recordId, content))
+  return runOwnedRecordWrite(target, current, { field: 'content', baseline }, () => updateContent(target.recordId, content))
 }
 
-export function updateOwnedProgress(target: RecordWriteTarget, progress: number, current: ScopeCheck): Promise<RecordWriteResult> {
+export function updateOwnedProgress(target: RecordWriteTarget, progress: number, current: ScopeCheck, baseline: EditBaseline): Promise<RecordWriteResult> {
   if (clampProgress(progress) === null) return Promise.resolve({ status: 'unavailable', reason: 'type' })
-  return runOwnedRecordWrite(target, current, { type: 'project' }, () => updateProjectProgress(target.recordId, progress))
+  return runOwnedRecordWrite(target, current, { type: 'project', field: 'progress', baseline }, () => updateProjectProgress(target.recordId, progress))
 }
 
 export function updateOwnedDeadline(target: RecordWriteTarget, date: string | null, current: ScopeCheck): Promise<RecordWriteResult> {

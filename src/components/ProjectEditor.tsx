@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { recordActions } from '../hooks/useRecords'
 import { useTodayLocalDate } from '../hooks/useToday'
 import {
   progressOf,
+  snapshotOf,
+  type RecordSnapshot,
   PROGRESS_MAX,
   PROGRESS_MIN,
   PROGRESS_STEP,
@@ -10,7 +12,9 @@ import {
 } from '../domain/record'
 import { deviceTimeZone } from '../utils/time'
 import { ProgressTrack, ProjectDeadline } from './ProjectProgress'
-import { captureWriteOwner, recordTarget } from '../app/writeOwner'
+import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
+import type { RecordWriteTarget } from '../domain/write'
+import { toaster } from '../app/toastStore'
 
 /** 快捷档位。拖动滑块调不准的两个极端，用按钮一步到位。 */
 const PRESETS = [0, 25, 50, 75] as const
@@ -29,8 +33,19 @@ const CHIP = 'tap tap-active h-9 flex-1 rounded-[9px] border text-[12.5px] tabul
  *   所以规则是「拖动只改界面，动作结束才落库一次」——
  *   结束的信号是松手（pointerup）、松开按键（keyup）。
  */
+const ADJUST_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'])
+
+interface DragSession {
+  target: RecordWriteTarget
+  baseline: RecordSnapshot
+  value: number
+  dirty: boolean
+}
+
 export function ProjectEditor({ userId, record }: { userId: string; record: LocalRecord }) {
   const target = recordTarget(captureWriteOwner(userId), record.id)
+  const session = useRef<DragSession | null>(null)
+  const [saving, setSaving] = useState(false)
   const committed = progressOf(record)
   const [dragging, setDragging] = useState(false)
   const [dragValue, setDragValue] = useState(committed)
@@ -43,11 +58,41 @@ export function ProjectEditor({ userId, record }: { userId: string; record: Loca
   // 顺带还避开了两个 lint 规则：渲染期间不许读 ref、effect 里不许 setState。
   const value = dragging ? dragValue : committed
 
-  /** 落库一次。只在「动作结束」时调用，绝不跟着 onChange 连续调用。 */
-  function commit(next: number): void {
+  function begin(): void {
+    if (saving || session.current || !isWriteOwnerCurrent(target)) return
+    session.current = { target, baseline: snapshotOf(record), value: committed, dirty: false }
+  }
+
+  async function saveProgress(next: number, baseline: RecordSnapshot, owner: RecordWriteTarget): Promise<void> {
+    if (saving) return
+    setSaving(true)
+    try {
+      const result = await recordActions.setProgress(owner, next, baseline)
+      if (result.status === 'stale' && isWriteOwnerCurrent(owner)) {
+        toaster.show({ message: '进度已更新为 ' + progressOf(result.current) + '%，这次调整没有覆盖它。请重新调整。' })
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function finish(): void {
+    const active = session.current
+    session.current = null
     setDragging(false)
+    if (!active?.dirty) return
+    void saveProgress(active.value, active.baseline, active.target)
+  }
+
+  function cancel(): void {
+    session.current = null
+    setDragging(false)
+  }
+
+  function applyPreset(next: number): void {
+    cancel()
     if (next === committed) return
-    void recordActions.setProgress(target, next)
+    void saveProgress(next, snapshotOf(record), target)
   }
 
   const tone = (active: boolean): string =>
@@ -78,13 +123,23 @@ export function ProjectEditor({ userId, record }: { userId: string; record: Loca
           max={PROGRESS_MAX}
           step={PROGRESS_STEP}
           value={value}
+          disabled={saving}
+          onPointerDown={begin}
+          onKeyDown={(event) => { if (ADJUST_KEYS.has(event.key)) begin() }}
           onChange={(event) => {
+            begin()
+            const active = session.current
+            if (!active) return
+            active.value = Number(event.target.value)
+            // 来回调整后回到开始值也没有新修改，不能用曾触发 change 当作保存依据。
+            active.dirty = active.value !== (active.baseline.progress ?? PROGRESS_MIN)
             setDragging(true)
-            setDragValue(Number(event.target.value))
+            setDragValue(active.value)
           }}
-          onPointerUp={() => commit(dragValue)}
-          onPointerCancel={() => commit(dragValue)}
-          onKeyUp={() => commit(dragValue)}
+          onPointerUp={finish}
+          onPointerCancel={cancel}
+          onKeyUp={(event) => { if (ADJUST_KEYS.has(event.key)) finish() }}
+          onBlur={finish}
           aria-label="大事进度"
           data-testid="project-slider"
           className="progress-slider absolute inset-0 h-11 w-full"
@@ -96,10 +151,8 @@ export function ProjectEditor({ userId, record }: { userId: string; record: Loca
           <button
             key={preset}
             type="button"
-            onClick={() => {
-              setDragValue(preset)
-              commit(preset)
-            }}
+            disabled={saving}
+            onClick={() => applyPreset(preset)}
             data-testid={`project-preset-${preset}`}
             className={`${CHIP} ${tone(value === preset)}`}
           >
@@ -108,10 +161,8 @@ export function ProjectEditor({ userId, record }: { userId: string; record: Loca
         ))}
         <button
           type="button"
-          onClick={() => {
-            setDragValue(PROGRESS_MAX)
-            commit(PROGRESS_MAX)
-          }}
+          disabled={saving}
+          onClick={() => applyPreset(PROGRESS_MAX)}
           data-testid="project-finish"
           className={`${CHIP} ${tone(value >= PROGRESS_MAX)}`}
         >
