@@ -1,5 +1,5 @@
 /**
- * 独立复算：在真实 SQLite 上跑一遍 D1 迁移 0001 → 0002 → 0003。
+ * 独立复算：在真实 SQLite 上跑一遍 D1 迁移 0001 → 0002 → 0003 → 0004。
  *
  * 为什么不只用 vitest：`src/test/d1Migration.test.ts` 已经覆盖同一套断言，
  * 但那是「同一份实现」。这里用一段**不依赖 vitest / jsdom 的独立代码**再算一遍 ——
@@ -21,6 +21,7 @@ const root = process.cwd()
 const LEGACY = readFileSync(resolve(root, 'worker/migrations/__fixtures__/schema-0001.sql'), 'utf8')
 const MIGRATION_0002 = readFileSync(resolve(root, 'worker/migrations/0002_project_type.sql'), 'utf8')
 const MIGRATION_0003 = readFileSync(resolve(root, 'worker/migrations/0003_log_type.sql'), 'utf8')
+const MIGRATION_0004 = readFileSync(resolve(root, 'worker/migrations/0004_record_invariants.sql'), 'utf8')
 const SCHEMA = readFileSync(resolve(root, 'worker/schema.sql'), 'utf8')
 
 const results = []
@@ -132,6 +133,8 @@ db.prepare(
 // ---------------------------------------------------------------
 process.stdout.write('\n【迁移】第 2 步：跑 0003\n')
 db.exec(MIGRATION_0003)
+process.stdout.write('\n【迁移】第 3 步：跑 0004（只重建触发器）\n')
+db.exec(MIGRATION_0004)
 
 process.stdout.write('\n【2】⚠️ 大事的进度不许在迁移中被清零\n')
 {
@@ -252,17 +255,17 @@ process.stdout.write('\n【6】新能力可用（log + parent_id）、新约束�
   mustThrow(
     '灵感不许带 parent_id',
     () => db.exec("update records set parent_id='r-proj', version=9 where id='r-idea'"),
-    /constraint/i,
+    /created_fields_are_immutable/i,
   )
   mustThrow(
     '待办不许带 parent_id',
     () => db.exec("update records set parent_id='r-proj', version=2 where id='r-todo'"),
-    /constraint/i,
+    /created_fields_are_immutable/i,
   )
   mustThrow(
     '大事不许带 parent_id（update）',
     () => db.exec("update records set parent_id='r-proj', version=8 where id='r-proj'"),
-    /constraint/i,
+    /created_fields_are_immutable/i,
   )
   mustThrow(
     '灵感不许带进度',

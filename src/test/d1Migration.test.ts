@@ -28,7 +28,7 @@ import { describe, expect, it } from 'vitest'
 const SCHEMA = readFileSync(resolve(process.cwd(), 'worker/schema.sql'), 'utf8')
 
 /**
- * ⚠️ 这两个都是**冻结副本**（连 users / access_tokens / applied_mutations
+ * ⚠️ 这三个都是**冻结副本**（连 users / access_tokens / applied_mutations
  * 和全部触发器一起），作为迁移测试的输入。
  * 它们是历史事实，**永远不要跟着 worker/schema.sql 一起改** ——
  * 改了就等于拿新表结构去测新表结构。
@@ -44,6 +44,10 @@ const FROZEN_0002 = readFileSync(
   resolve(process.cwd(), 'worker/migrations/__fixtures__/schema-0002.sql'),
   'utf8',
 )
+const FROZEN_0003 = readFileSync(
+  resolve(process.cwd(), 'worker/migrations/__fixtures__/schema-0003.sql'),
+  'utf8',
+)
 
 const MIGRATION_0002 = readFileSync(
   resolve(process.cwd(), 'worker/migrations/0002_project_type.sql'),
@@ -53,6 +57,8 @@ const MIGRATION_0003 = readFileSync(
   resolve(process.cwd(), 'worker/migrations/0003_log_type.sql'),
   'utf8',
 )
+
+const MIGRATION_0004 = readFileSync(resolve(process.cwd(), 'worker/migrations/0004_record_invariants.sql'), 'utf8')
 
 /** 线上库里的真实形态：活的 idea、活的 todo、一条软删除的墓碑 */
 const SEED = [
@@ -138,10 +144,11 @@ function dbAfter0002(): DatabaseSync {
   return db
 }
 
-/** 全链：老库 + 真实数据 + 0002 + 0003 */
+/** 全链：老库 + 真实数据 + 0002 + 0003 + 0004 */
 function migratedDb(): DatabaseSync {
   const db = dbAfter0002()
   db.exec(MIGRATION_0003)
+  db.exec(MIGRATION_0004)
   return db
 }
 
@@ -450,6 +457,7 @@ describe('★ 0003 必须把大事的进度原样带过去（0002 那次只能�
     const db = dbAfter0002()
     insertProject(db, 'r-proj', 60, '2026-10-12')
     db.exec(MIGRATION_0003)
+    db.exec(MIGRATION_0004)
 
     const row = db
       .prepare("select type, progress, deadline_local_date, parent_id from records where id = 'r-proj'")
@@ -517,8 +525,64 @@ describe('★ 冻结副本没有被跟着改（否则这个文件会彻底失去
     expect(FROZEN_0002).not.toContain('parent_id')
   })
 
-  it('两个副本都与当前 schema.sql 不同（说明它们真的是历史快照）', () => {
+  it('前两个副本都与当前 schema.sql 不同（说明它们真的是历史快照）', () => {
     expect(LEGACY_0001).not.toBe(SCHEMA)
     expect(FROZEN_0002).not.toBe(SCHEMA)
+  })
+
+  it('schema-0003仍保留上线时的NULL比较缺陷，不能跟着修成新触发器', () => {
+    expect(FROZEN_0003).toMatch(/new\.parent_id\s+<>\s+old\.parent_id/)
+    expect(FROZEN_0003).not.toMatch(/new\.parent_id\s+is not\s+old\.parent_id/)
+    expect(FROZEN_0003).not.toBe(SCHEMA)
+  })
+})
+
+describe('R18：0003存量库前向升级，不搬一行数据', () => {
+  function seeded0003(): DatabaseSync {
+    const db = new DatabaseSync(':memory:')
+    db.exec(FROZEN_0003)
+    insertProject(db, 'r-existing-project', 39, '2026-12-31')
+    insertLog(db, 'r-existing-log', 'r-existing-project')
+    insertLog(db, 'r-null-parent', 'r-existing-project')
+    // 在旧库允许的NULL漏洞下构造历史形态；新迁移应保留它，只禁止再次改归属。
+    db.exec("update records set parent_id=null,version=2 where id='r-null-parent'")
+    db.exec("update records set progress=62,deleted_at_utc='2026-10-04T00:00:00.000Z',version=2 where id='r-existing-log'")
+    db.exec("insert into applied_mutations(mutation_id,user_id,record_id,result_version,applied_at) values ('m-existing','u-1','r-existing-log',2,'2026-10-04T00:00:00.000Z')")
+    return db
+  }
+
+  it('记录、墓碑、进度、截止日、parent与幂等记录逐列不变，索引/列形状也不变', () => {
+    const db = seeded0003()
+    const records = db.prepare('select * from records order by id').all()
+    const mutations = db.prepare('select * from applied_mutations order by mutation_id').all()
+    const indexes = db.prepare("select name,sql from sqlite_master where type='index' order by name").all()
+    const shape = db.prepare('pragma table_info(records)').all()
+    db.exec(MIGRATION_0004)
+    expect(db.prepare('select * from records order by id').all()).toEqual(records)
+    expect(db.prepare('select * from applied_mutations order by mutation_id').all()).toEqual(mutations)
+    expect(db.prepare("select name,sql from sqlite_master where type='index' order by name").all()).toEqual(indexes)
+    expect(db.prepare('pragma table_info(records)').all()).toEqual(shape)
+    db.close()
+  })
+
+  for (const assignment of ['parent_id=null', "parent_id='other-project'", 'id=null']) {
+    it(`升级后的NULL安全比较拒绝 ${assignment}`, () => {
+      const db = seeded0003()
+      db.exec(MIGRATION_0004)
+      expect(() => db.exec(`update records set ${assignment},version=3 where id='r-existing-log'`)).toThrow(/created_fields_are_immutable/)
+      expect(db.prepare("select parent_id,progress from records where id='r-existing-log'").get()).toMatchObject({ parent_id: 'r-existing-project', progress: 62 })
+      db.close()
+    })
+  }
+
+  it('历史NULL父级不能后挂；相同NULL/非NULL仍可正常更新', () => {
+    const db = seeded0003()
+    db.exec(MIGRATION_0004)
+    expect(() => db.exec("update records set parent_id='r-existing-project',version=3 where id='r-null-parent'")).toThrow(/created_fields_are_immutable/)
+    db.exec("update records set parent_id=null,content='NULL不变',version=3 where id='r-null-parent'")
+    db.exec("update records set parent_id=parent_id,content='非NULL不变',version=3 where id='r-existing-log'")
+    expect(db.prepare("select content from records where id='r-null-parent'").get()?.['content']).toBe('NULL不变')
+    expect(db.prepare("select content from records where id='r-existing-log'").get()?.['content']).toBe('非NULL不变')
+    db.close()
   })
 })

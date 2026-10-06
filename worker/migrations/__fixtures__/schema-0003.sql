@@ -58,7 +58,6 @@ create index if not exists access_tokens_user_idx on access_tokens (user_id);
 --   线上已有数据的库必须按顺序跑 worker/migrations/ 下的迁移：
 --     0002_project_type.sql（加 project 类型 + 进度 / 截止日）
 --     0003_log_type.sql   （加 log 类型 + parent_id）
---     0004_record_invariants.sql（NULL 安全的不可变字段约束）
 --   `create table if not exists` 遇到已存在的表会整段跳过，
 --   改这里的列定义对老库**完全不生效**，而且 type 的 CHECK 约束
 --   只能靠重建表才能改。这是本项目最容易踩空的一处。
@@ -133,18 +132,19 @@ end;
 -- 2. 创建时定死的字段永不改变
 --    parent_id 也在其中：进展「属于哪件大事」是写下的那一刻定死的，
 --    允许改它只会制造出「一条进展挂到了两件大事下」这类没法解释的状态。
---    （IS NOT 对 NULL 也是明确的 true/false；两边同为 NULL 不会误伤普通记录。）
+--    （NULL 与 NULL 比较在 SQL 里是 NULL 而非 true，所以两边都是 null 时
+--     这条 when 不成立，不会误伤灵感 / 待办。）
 drop trigger if exists records_created_fields_immutable;
 create trigger records_created_fields_immutable
 before update on records
 for each row
-when new.created_at_utc     is not old.created_at_utc
-  or new.created_local_date is not old.created_local_date
-  or new.created_timezone   is not old.created_timezone
-  or new.id                 is not old.id
-  or new.user_id            is not old.user_id
-  or new.type               is not old.type
-  or new.parent_id          is not old.parent_id
+when new.created_at_utc     <> old.created_at_utc
+  or new.created_local_date <> old.created_local_date
+  or new.created_timezone   <> old.created_timezone
+  or new.id                 <> old.id
+  or new.user_id            <> old.user_id
+  or new.type               <> old.type
+  or new.parent_id          <> old.parent_id
 begin
   select raise(abort, 'created_fields_are_immutable');
 end;

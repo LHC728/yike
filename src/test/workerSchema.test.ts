@@ -183,13 +183,13 @@ describe('产品红线写成了数据库约束', () => {
   it('2. 创建时间与身份字段永不改变', () => {
     expect(d1Sql).toContain('create trigger records_created_fields_immutable')
     for (const column of [
-      'new.created_at_utc     <> old.created_at_utc',
-      'new.created_local_date <> old.created_local_date',
-      'new.created_timezone   <> old.created_timezone',
-      'new.id                 <> old.id',
-      'new.user_id            <> old.user_id',
-      'new.type               <> old.type',
-      'new.parent_id          <> old.parent_id',
+      'new.created_at_utc     is not old.created_at_utc',
+      'new.created_local_date is not old.created_local_date',
+      'new.created_timezone   is not old.created_timezone',
+      'new.id                 is not old.id',
+      'new.user_id            is not old.user_id',
+      'new.type               is not old.type',
+      'new.parent_id          is not old.parent_id',
     ]) {
       expect(d1Sql).toContain(column)
     }

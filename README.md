@@ -368,27 +368,63 @@ npm run cloudflare:setup -- --subdomain=名字  # 指定 workers.dev 子域名
 > 事后无法从库里取回明文 —— 请当场复制走。
 > 丢了不要紧，重跑一次 `--token-only` 就会发一个新的（旧的仍然有效）。
 
-#### 已经部署过？升级到「大事 / 进展」要跑迁移
+#### 已经部署过？新增字段与数据库约束都要跑迁移
 
 `worker/schema.sql` 里的 `create table if not exists` 对**已存在的表整段跳过**，
 所以光重新部署 Worker 不会给老库加上新列 —— 老库必须单独跑一次迁移。
 
-| 迁移 | 带来什么 | 为什么必须重建 records 表 |
+| 迁移 | 带来什么 | 数据库变更方式 |
 | --- | --- | --- |
 | `0002_project_type.sql` | 大事：`progress`、`deadline_local_date` | SQLite 改不了 CHECK 约束，只能重建 |
 | `0003_log_type.sql` | 进展：`parent_id`，类型放宽到四种 | 同上（原来那条大 CHECK 要拆成三条） |
+| `0004_record_invariants.sql` | 不可变字段比较兼容 NULL，禁止修改父级与创建事实 | 只重建一个触发器，不重建表、不搬数据 |
+
+截至本次审计修复（2026-10-06），线上 `yike-sync` 已知执行到 **0003**；
+新增 0004 只是仓库文件，**尚未执行线上升级**。已有 0003 库只追加 0004，
+更旧的库按顺序补齐后续迁移；不要重复执行已经完成的历史重建迁移。
 
 ```bash
-# 1) 先备份（强烈建议，这一步是后悔药）
+set -e  # 任一步失败就停止，不带着失败的备份继续迁移
+
+# 1) 先备份
 npx wrangler d1 export yike-sync --remote --output backup-$(date +%F).sql
 
-# 2) 再迁移（没跑过 0002 的从 0002 开始，按顺序来）
-npx wrangler d1 execute yike-sync --remote --file=worker/migrations/0002_project_type.sql
-npx wrangler d1 execute yike-sync --remote --file=worker/migrations/0003_log_type.sql
+# 2) 已有 0003 库只追加 0004；更旧库才按需先执行下面两份历史迁移
+# npx wrangler d1 execute yike-sync --remote --file=worker/migrations/0002_project_type.sql
+# npx wrangler d1 execute yike-sync --remote --file=worker/migrations/0003_log_type.sql
+npx wrangler d1 execute yike-sync --remote --file=worker/migrations/0004_record_invariants.sql
 
 # 3) 最后重新部署 Worker —— 后端代码也要认识新列
 cd worker && npx wrangler deploy
 ```
+
+本机 Windows 的 `npx wrangler@4` 已知会在 esbuild 阶段失败，
+请在项目根目录的 **PowerShell** 使用临时安装的 CLI。以下是已有 0003 库的升级示例：
+
+```powershell
+$wranglerWorkDir = Join-Path $env:TEMP 'yike-wrangler4'
+npm.cmd install --ignore-scripts --prefix $wranglerWorkDir 'wrangler@4'
+if ($LASTEXITCODE -ne 0) { throw 'Wrangler 安装失败，停止升级' }
+$wranglerBin = Join-Path $wranglerWorkDir 'node_modules\wrangler\bin\wrangler.js'
+$wranglerConfig = Join-Path (Get-Location) 'worker\wrangler.toml'
+$migrationFile = Join-Path (Get-Location) 'worker\migrations\0004_record_invariants.sql'
+$backupFile = Join-Path (Get-Location) ('yike-sync-backup-{0}.sql' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+# 1) 备份成功并得到导出文件后才继续
+node $wranglerBin d1 export yike-sync --config $wranglerConfig --remote --output $backupFile
+if ($LASTEXITCODE -ne 0) { throw '备份失败，停止升级' }
+
+# 2) 仅追加 0004，不重新执行 0002 / 0003
+node $wranglerBin d1 execute yike-sync --config $wranglerConfig --remote --file $migrationFile
+if ($LASTEXITCODE -ne 0) { throw '迁移失败，停止部署' }
+
+# 3) 部署当前 Worker
+node $wranglerBin deploy --config $wranglerConfig
+```
+
+迁移不会自己更新 Worker；仍按**备份 → execute → deploy**顺序完成升级。
+这段说明不是已经执行升级的记录。若使用 Git Bash 执行带路径的命令，
+还要设置 `MSYS_NO_PATHCONV=1`，防止 `/yike/` 等参数被改写为本机路径。
 
 > ⚠️ **三步都要做。** 只做第 2 步的话，老 Worker 收到带 `progress` 的请求
 > 会**当作没看见**（payload 里多出来的字段被忽略），于是进度不会报错，
@@ -419,7 +455,7 @@ npx wrangler d1 execute yike-sync --remote --json --command \
 > 这条命令**不要**写成 `select ... union all select ...` 拼很多行 ——
 > D1 对 compound SELECT 的项数有限制，拼多了会报 `too many terms in compound SELECT`。
 
-重建的顺序是：drop 触发器 → rename 留底 → 建新表 → 搬数据 → drop 旧表
+0002 / 0003 历史迁移重建表的顺序是：drop 触发器 → rename 留底 → 建新表 → 搬数据 → drop 旧表
 → 重建索引 → 重建触发器。里面任何一步写漏都**不会报错**：
 
 - 索引忘了重建 → 查询悄悄退化成全表扫描，功能看着一切正常
@@ -429,7 +465,7 @@ npx wrangler d1 execute yike-sync --remote --json --command \
   因重名被静默跳过，于是索引干脆不存在
 
 所以迁移有一份**专门的测试**（`src/test/d1Migration.test.ts`），
-在真实 SQLite 上从 0001 一路跑到 0003，然后逐项验：
+在真实 SQLite 上从 0001 一路跑到 0004，另从冻结 0003 存量库单独追加 0004，然后逐项验：
 数据一条不少、索引与四个触发器一个不少、红线依然有效、新能力可用，
 最后还要求**迁移结果与全新安装逐列、逐触发器完全一致**。
 
@@ -742,13 +778,13 @@ npm run test:e2e   # 终端 B
 
 ### 同步后端（Cloudflare）的测试
 
-| 文件 | 测什么 | 数量 |
-| --- | --- | --- |
-| `workerCore.test.ts` | 鉴权 / 幂等 / 版本冲突 / 创建时间不可变 / 跨账号隔离 / 竞态 / 大事字段 / **进展与 `parent_id` 不可变** | 54 |
-| `workerHttp.test.ts` | 401 / 400 / 404 / CORS / 跨域 / **出错绝不返回成功** | 38 |
-| `workerSchema.test.ts` | 触发器是否真在拦、两套后端表结构是否逐列一致 | 18 |
-| `d1Migration.test.ts` | **0001 → 0002 → 0003 全链迁移**：数据不丢不串、大事的进度不被清零、索引与四个触发器一个不少、红线仍有效、迁移结果 == 全新安装 | 23 |
-| `cloudflareAdapter.test.ts` | 字段归一、状态透传、**失败不装成功** | 37 |
+| 文件 | 测什么 |
+| --- | --- |
+| `workerCore.test.ts` | 鉴权 / 幂等 / 版本冲突 / 创建时间不可变 / 跨账号隔离 / 竞态 / 大事字段 / **进展与 `parent_id` 不可变** |
+| `workerHttp.test.ts` | 401 / 400 / 404 / CORS / 跨域 / **出错绝不返回成功** |
+| `workerSchema.test.ts` | 触发器是否真在拦、两套后端表结构是否逐列一致 |
+| `d1Migration.test.ts` | **0001 → 0002 → 0003 → 0004 全链迁移**及冻结 0003 单独升级：记录、幂等流水、索引与字段逐列保留，NULL 两向不可变，迁移结果 == 全新安装 |
+| `cloudflareAdapter.test.ts` | 字段归一、状态透传、**失败不装成功** |
 
 **这些测试跑在真实 SQLite 上**（Node 22 内置的 `node:sqlite`，见
 `src/test/sqliteD1.ts`），并且会加载 `worker/schema.sql` 的触发器。
