@@ -7,6 +7,7 @@
  * 语义必须与 supabase/migrations/0001_init.sql 里的 apply_record_mutation
  * 逐条对齐 —— 两套后端是可互换的，客户端的同步引擎不该感知到差别。
  */
+import { validatedCreationFields } from './creationValidation'
 
 // ---------------------------------------------------------------
 // D1 的最小类型声明
@@ -407,6 +408,8 @@ export async function applyMutation(
       return { status: 'record_not_found', version: null, record: null }
     }
 
+    // 幂等与已有记录分支先返回；只校验真正 INSERT 的创建事实，重放不能被新 payload 干扰。
+    const creation = validatedCreationFields(payload, now)
     const type = asType(str(payload, 'type'))
     // 哪些字段对哪种类型有意义，与客户端 `createRecord` 逐条对齐：
     //   progress  → 大事、进展
@@ -437,9 +440,9 @@ export async function applyMutation(
         keepsProgress ? asProgress(payload['progress']) : null,
         isProject ? asDeadline(payload['deadlineLocalDate']) : null,
         isLog ? asParentId(payload['parentId']) : null,
-        str(payload, 'createdAtUtc') ?? now,
-        str(payload, 'createdTimezone') ?? 'UTC',
-        str(payload, 'createdLocalDate') ?? now.slice(0, 10),
+        creation.createdAtUtc,
+        creation.createdTimezone,
+        creation.createdLocalDate,
         str(payload, 'updatedAtUtc') ?? now,
         present(payload, 'updatedTimezone'),
         present(payload, 'completedAtUtc'),

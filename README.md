@@ -563,24 +563,26 @@ Region 选 **Southeast Asia (Singapore)** 或 **Northeast Asia (Tokyo)**（离�
 
 #### 2. 建表
 
-在 Supabase 项目的 SQL Editor 中执行：
+新建项目时，在 Supabase 项目的 SQL Editor 中按顺序逐份执行以下 SQL 文件的完整内容：
 
 ```
 supabase/migrations/0001_init.sql
+supabase/migrations/0002_project_type.sql
+supabase/migrations/0003_log_type.sql
+supabase/migrations/0004_creation_validation.sql
 ```
 
-脚本会创建 `records` / `applied_mutations` 两张表、四个索引、
+脚本会创建 `records` / `applied_mutations` 两张表及相关索引、
 `apply_record_mutation` RPC，并开启 RLS：
 
 - 用户只能 `SELECT` / `INSERT` / `UPDATE` 自己的数据（`user_id = auth.uid()`）
 - **故意不创建 DELETE 策略** → 物理删除在数据库层面被彻底禁止
 
-> **如果你的库是「大事」之前建的**，再执行一次
-> `supabase/migrations/0002_project_type.sql`。
-> Postgres 加列不需要重建表（`add column if not exists`），
-> 但**必须重定义 `apply_record_mutation`** —— 老版本不知道
-> `progress` / `deadline_local_date` 两个字段，会把它们当未知字段丢掉。
-> 这个脚本是幂等的，跑第二遍什么都不会发生。
+> **已有数据库只补齐尚未执行的后续迁移**：已经执行到 0003 的库只执行 0004；
+> 更旧的库按上面的顺序补齐。0002 增加大事与进度，0003 增加进展和父级，
+> 0004 校验新记录的创建时刻、日期与时区，不重建表、不搬动已有记录。
+> 加列之外还需要更新 `apply_record_mutation` RPC，旧函数不会保存新字段。
+> 不要在新迁移之后重跑旧迁移文件，否则可能把 RPC 换回旧版本。
 
 > Supabase 会弹一个「**检测到潜在问题 / 破坏性操作**」的确认框 —— **点「运行查询」**。
 > 脚本里有几条 `drop ... if exists`（先删后建，为了让脚本可以重复运行），

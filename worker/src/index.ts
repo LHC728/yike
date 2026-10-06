@@ -13,6 +13,7 @@
  * 鉴权：Authorization: Bearer <访问令牌>。
  * 令牌只存 SHA-256，库里没有明文。
  */
+import { CreationValidationError } from './creationValidation'
 import {
   applyMutation,
   pullAll,
@@ -190,6 +191,9 @@ export default {
 
       return json({ error: 'not_found' }, 404, cors)
     } catch (error) {
+      if (error instanceof CreationValidationError) {
+        return json({ error: 'invalid_creation_fields', field: error.field }, 400, cors)
+      }
       // 出错时绝不能返回「看起来成功」的响应 —— 客户端会把失败当成已应用，
       // 那才是真正的数据丢失。返回 500，让 outbox 保留 mutation 稍后重试。
       //
