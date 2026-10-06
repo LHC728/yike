@@ -31,10 +31,15 @@ permissions:
 jobs:
   build:
     name: 构建 Pages 产物
-    # 只有 CI 成功才部署；手动触发时无条件执行
+    # workflow_run 的默认 ref 不能证明 head_sha 来源；未合并 PR 即便 CI 成功也不能发布。
+    # 手动运行同样只接受 main，避免选错分支直接上线。
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
