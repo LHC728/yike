@@ -5,7 +5,7 @@ import {
   type CreateRecordInput,
 } from './recordRepository'
 import { clampProgress, snapshotEquals, snapshotOf, type LocalRecord, type RecordType } from '../domain/record'
-import type { RecordWriteResult, RecordWriteTarget, WriteOwner } from '../domain/write'
+import type { EditBaseline, RecordWriteResult, RecordWriteTarget, WriteOwner } from '../domain/write'
 
 type ScopeCheck = () => boolean
 
@@ -20,6 +20,7 @@ interface OwnedChangeOptions {
   allowConflict?: boolean
   requireConflict?: boolean
   type?: RecordType
+  baseline?: EditBaseline
 }
 
 /**
@@ -46,6 +47,12 @@ export async function runOwnedRecordWrite(
       if (conflict && conflict.userId !== target.userId) return { status: 'unavailable', reason: 'owner' }
       if (options.requireConflict && !conflict) return { status: 'unavailable', reason: 'missing' }
       if (!options.allowConflict && conflict) return { status: 'unavailable', reason: 'conflict' }
+      const { baseline } = options
+      // 同步版本相同也可能已有本机编辑；只核对正文及关系/删除状态，独立的进度等更新照常保留。
+      if (baseline && (
+        record.content !== baseline.content || record.deletedAtUtc !== baseline.deletedAtUtc ||
+        record.type !== baseline.type || record.parentId !== baseline.parentId
+      )) return { status: 'stale', current: record }
       const before = snapshotOf(record)
       const updated = await write(record)
       checkScope(current)
@@ -83,8 +90,8 @@ export async function createOwnedRecord(
   }
 }
 
-export function updateOwnedContent(target: RecordWriteTarget, content: string, current: ScopeCheck): Promise<RecordWriteResult> {
-  return runOwnedRecordWrite(target, current, {}, () => updateContent(target.recordId, content))
+export function updateOwnedContent(target: RecordWriteTarget, content: string, current: ScopeCheck, baseline: EditBaseline): Promise<RecordWriteResult> {
+  return runOwnedRecordWrite(target, current, { baseline }, () => updateContent(target.recordId, content))
 }
 
 export function updateOwnedProgress(target: RecordWriteTarget, progress: number, current: ScopeCheck): Promise<RecordWriteResult> {

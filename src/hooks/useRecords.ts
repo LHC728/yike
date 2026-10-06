@@ -12,7 +12,7 @@ import {
 } from '../db/uiRecordRepository'
 import { captureWriteOwner, isWriteOwnerCurrent } from '../app/writeOwner'
 import { toaster } from '../app/toastStore'
-import { didWrite, type RecordWriteResult, type RecordWriteTarget, type WriteOwner } from '../domain/write'
+import { didWrite, type EditBaseline, type RecordWriteResult, type RecordWriteTarget, type WriteOwner } from '../domain/write'
 import { resolveOwnedConflict } from '../sync/ownedConflict'
 import { countPending } from '../db/outboxRepository'
 import type { LocalRecord, RecordType } from '../domain/record'
@@ -105,6 +105,13 @@ export function useLogs(userId: string | null, projectId: string | null): LocalR
   const records = useAllRecords(userId)
   if (!projectId) return EMPTY
   return records.filter((record) => isLogOf(record, projectId)).toSorted(byCreatedAtDesc)
+}
+
+/** 编辑中的远端软删进展仍需保留原行，取消后才由界面隐藏草稿。 */
+export function useLogsWithDeleted(userId: string | null, projectId: string | null): LocalRecord[] {
+  const records = useAllRecords(userId)
+  if (!projectId) return EMPTY
+  return records.filter((record) => record.type === 'log' && record.parentId === projectId).toSorted(byCreatedAtDesc)
 }
 
 /**
@@ -218,8 +225,8 @@ export const recordActions = {
   quickCapture(owner: WriteOwner, content: string, type: RecordType): Promise<RecordWriteResult> {
     return recordActions.create(owner, { type, content })
   },
-  updateContent(target: RecordWriteTarget, content: string): Promise<RecordWriteResult> {
-    return safeWrite(target, () => updateOwnedContent(target, content, () => isWriteOwnerCurrent(target)))
+  updateContent(target: RecordWriteTarget, content: string, baseline: EditBaseline): Promise<RecordWriteResult> {
+    return safeWrite(target, () => updateOwnedContent(target, content, () => isWriteOwnerCurrent(target), baseline))
   },
   setProgress(target: RecordWriteTarget, progress: number): Promise<RecordWriteResult> {
     return safeWrite(target, () => updateOwnedProgress(target, progress, () => isWriteOwnerCurrent(target)))

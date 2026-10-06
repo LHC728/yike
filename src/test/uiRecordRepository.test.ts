@@ -36,7 +36,7 @@ describe('UI 账号归属与事务边界', () => {
     const original = await fixture('todo')
     const wrong: RecordWriteTarget = { ...OWNER, userId: 'ui-owner-B', recordId: original.id }
     const writes = [
-      () => updateOwnedContent(wrong, 'B 的错误正文', CURRENT),
+      () => updateOwnedContent(wrong, 'B 的错误正文', CURRENT, snapshotOf(original)),
       () => updateOwnedProgress(wrong, 50, CURRENT),
       () => updateOwnedDeadline(wrong, '2026-12-01', CURRENT),
       () => completeOwnedTodo(wrong, CURRENT),
@@ -120,9 +120,9 @@ describe('UI 账号归属与事务边界', () => {
       remoteVersion: 2, createdAt: '2026-10-06T02:00:00.000Z',
     })
     await database.outbox.clear()
-    expect(await updateOwnedContent({ ...OWNER, recordId: deleted.id }, '不得恢复', CURRENT))
+    expect(await updateOwnedContent({ ...OWNER, recordId: deleted.id }, '不得恢复', CURRENT, snapshotOf(deleted)))
       .toEqual({ status: 'unavailable', reason: 'deleted' })
-    expect(await updateOwnedContent({ ...OWNER, recordId: conflicted.id }, '不得覆盖冲突', CURRENT))
+    expect(await updateOwnedContent({ ...OWNER, recordId: conflicted.id }, '不得覆盖冲突', CURRENT, snapshotOf(conflicted)))
       .toEqual({ status: 'unavailable', reason: 'conflict' })
     expect((await database.records.get(deleted.id))?.deletedAtUtc).not.toBeNull()
     expect(await database.records.get(conflicted.id)).toEqual(conflicted)

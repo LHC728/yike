@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { recordActions, useLogs } from '../hooks/useRecords'
+import { recordActions, useLogsWithDeleted } from '../hooks/useRecords'
 import { useTodayLocalDate } from '../hooks/useToday'
 import { progressOf, type LocalRecord } from '../domain/record'
 import { deviceTimeZone, formatRelativeStamp } from '../utils/time'
 import { toaster } from '../app/toastStore'
 import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
 import { didWrite } from '../domain/write'
+import { useStaleContentEditor } from '../hooks/useStaleContentEditor'
+import { StaleEditNotice } from './StaleEditNotice'
 
 /**
  * 大事详情里的「进展记录」。
@@ -24,7 +26,18 @@ import { didWrite } from '../domain/write'
  */
 export function ProjectLogs({ userId, project }: { userId: string; project: LocalRecord }) {
   const target = recordTarget(captureWriteOwner(userId), project.id)
-  const logs = useLogs(userId, project.id)
+  const allLogs = useLogsWithDeleted(userId, project.id)
+  const [editingIds, setEditingIds] = useState<Set<string>>(() => new Set())
+  const logs = allLogs.filter((log) => log.deletedAtUtc === null || editingIds.has(log.id))
+  const activeCount = allLogs.filter((log) => log.deletedAtUtc === null).length
+  const onEditingChange = (id: string, editing: boolean): void => {
+    setEditingIds((previous) => {
+      const next = new Set(previous)
+      if (editing) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
   const today = useTodayLocalDate(deviceTimeZone())
 
   const [draft, setDraft] = useState('')
@@ -52,7 +65,7 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
       <div className="flex items-baseline gap-2">
         <span className="text-[12.5px] text-ink-soft">进展记录</span>
         <span className="text-[12px] tabular-nums text-ink-soft" data-testid="project-logs-count">
-          {logs.length} 条
+          {activeCount} 条
         </span>
       </div>
 
@@ -94,7 +107,7 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
         <ul className="mt-3">
           {logs.map((log) => (
             <li key={log.id}>
-              <LogRow userId={userId} log={log} today={today} />
+              <LogRow userId={userId} log={log} today={today} onEditingChange={onEditingChange} />
             </li>
           ))}
         </ul>
@@ -108,34 +121,19 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
  * 编辑框里有删除 —— 删除按钮只在编辑态出现，避免在手机上
  * 让一行里挤两个可点区域、误触到删。
  */
-function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; today: string }) {
+function LogRow({ userId, log, today, onEditingChange }: { userId: string; log: LocalRecord; today: string; onEditingChange: (id: string, editing: boolean) => void }) {
   const target = recordTarget(captureWriteOwner(userId), log.id)
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(log.content)
-  const [saving, setSaving] = useState(false)
+  const editor = useStaleContentEditor(log, userId, (editing) => onEditingChange(log.id, editing))
+  const { editing, draft, saving, setDraft } = editor
 
   // 进度是「写下这条时的快照」，可能没有（老数据 / 未记录）
   const percent = log.progress
   const stamp = formatRelativeStamp(log.createdAtUtc, today, log.createdTimezone)
 
-  async function save(): Promise<void> {
-    const text = draft.trim()
-    if (text === log.content) {
-      setEditing(false)
-      return
-    }
-    setSaving(true)
-    try {
-      const result = await recordActions.updateContent(target, text)
-      if (didWrite(result) && isWriteOwnerCurrent(target)) setEditing(false)
-    } finally {
-      setSaving(false)
-    }
-  }
-
   async function remove(): Promise<void> {
     const result = await recordActions.remove(target)
     if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
+    editor.cancel()
     toaster.show({
       message: '已删除这条进展',
       actionLabel: '撤销',
@@ -150,6 +148,7 @@ function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; toda
       <div className="rounded-[10px] bg-sunken px-2.5 py-2" data-testid="project-log-editor">
         <textarea
           value={draft}
+          disabled={saving}
           autoFocus
           rows={2}
           onChange={(event) => setDraft(event.target.value)}
@@ -157,11 +156,16 @@ function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; toda
           data-testid="project-log-editor-input"
           className="w-full resize-none rounded-[8px] border border-line bg-canvas px-2.5 py-2 text-[15px] leading-[1.5] text-ink outline-none focus:border-project/50"
         />
+        {editor.stale ? (
+          <StaleEditNotice currentContent={editor.stale.content} busy={saving} testId="project-log-stale"
+            onReload={editor.reload} onKeepDraft={editor.keepDraft} />
+        ) : null}
+        {editor.message ? <p className="mt-3 text-[13px] text-ink-soft">{editor.message}</p> : null}
         <div className="mt-2 flex items-center gap-2">
           <button
             type="button"
             disabled={saving}
-            onClick={() => void save()}
+            onClick={() => void editor.save()}
             data-testid="project-log-editor-save"
             className="tap tap-active h-9 rounded-[9px] bg-project px-3.5 text-[13px] font-medium text-on-project disabled:opacity-50"
           >
@@ -169,10 +173,8 @@ function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; toda
           </button>
           <button
             type="button"
-            onClick={() => {
-              setDraft(log.content)
-              setEditing(false)
-            }}
+            disabled={saving}
+            onClick={editor.cancel}
             data-testid="project-log-editor-cancel"
             className="tap tap-active h-9 rounded-[9px] px-3 text-[13px] text-ink-soft"
           >
@@ -180,6 +182,7 @@ function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; toda
           </button>
           <button
             type="button"
+            disabled={saving}
             onClick={() => void remove()}
             data-testid="project-log-delete"
             className="tap tap-active ml-auto h-9 rounded-[9px] px-3 text-[13px] text-danger"
@@ -194,10 +197,7 @@ function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; toda
   return (
     <button
       type="button"
-      onClick={() => {
-        setDraft(log.content)
-        setEditing(true)
-      }}
+      onClick={editor.begin}
       data-testid="project-log-row"
       className="tap tap-active block w-full rounded-[10px] px-2 py-2 text-left"
     >

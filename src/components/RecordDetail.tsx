@@ -12,6 +12,8 @@ import { ProjectEditor } from './ProjectEditor'
 import { ProjectLogs } from './ProjectLogs'
 import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
 import { didWrite } from '../domain/write'
+import { useStaleContentEditor } from '../hooks/useStaleContentEditor'
+import { StaleEditNotice } from './StaleEditNotice'
 
 interface RecordDetailProps {
   userId: string
@@ -35,9 +37,8 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
     return entry?.userId === userId ? entry : undefined
   }, [userId, recordId])
 
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [saving, setSaving] = useState(false)
+  const editor = useStaleContentEditor(record, userId)
+  const { editing, draft, saving, setDraft } = editor
   // 删除前先问一句（用户拍板）。删除是 V1 里唯一「一键丢数据」的动作：
   // 打勾能再点回来、编辑能改回去，只有删除是不可逆的（软删但界面上找不回来）。
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -50,17 +51,6 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
 
   if (!record) {
     return <p className="py-8 text-center text-[13px] text-ink-soft">这条记录已不存在。</p>
-  }
-
-  async function handleSave() {
-    if (!record) return
-    setSaving(true)
-    try {
-      const result = await recordActions.updateContent(target, draft)
-      if (didWrite(result) && isWriteOwnerCurrent(target)) setEditing(false)
-    } finally {
-      setSaving(false)
-    }
   }
 
   async function handleDelete() {
@@ -97,6 +87,7 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
       {editing ? (
         <textarea
           value={draft}
+          disabled={saving}
           autoFocus
           rows={3}
           onChange={(event) => setDraft(event.target.value)}
@@ -111,6 +102,12 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
           {record.content || <span className="text-ink-soft">（空）</span>}
         </p>
       )}
+
+      {editing && editor.stale ? (
+        <StaleEditNotice currentContent={editor.stale.content} busy={saving} testId="detail-stale"
+          onReload={editor.reload} onKeepDraft={editor.keepDraft} />
+      ) : null}
+      {editing && editor.message ? <p className="mt-3 text-[13px] text-ink-soft">{editor.message}</p> : null}
 
       {record.type === 'todo' ? (
         <p className="mt-3 text-[12px] text-ink-soft">
@@ -164,7 +161,7 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
             <button
               type="button"
               disabled={saving}
-              onClick={() => void handleSave()}
+              onClick={() => void editor.save()}
               data-testid="detail-save"
               className="tap tap-active h-10 rounded-[10px] bg-idea px-4 text-[14px] font-medium text-on-idea disabled:opacity-50"
             >
@@ -172,7 +169,8 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
             </button>
             <button
               type="button"
-              onClick={() => setEditing(false)}
+              disabled={saving}
+              onClick={editor.cancel}
               className="tap tap-active h-10 rounded-[10px] px-3 text-[14px] text-ink-soft"
             >
               取消
@@ -182,10 +180,7 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
           <>
             <button
               type="button"
-              onClick={() => {
-                setDraft(record.content)
-                setEditing(true)
-              }}
+              onClick={editor.begin}
               data-testid="detail-edit"
               className="tap tap-active h-10 rounded-[10px] border border-line px-4 text-[14px] text-ink-soft"
             >
