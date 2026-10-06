@@ -3,7 +3,6 @@ import {
   daysInMonth,
   formatMonthTitle,
   monthGrid,
-  todayLocalDate,
   type MonthInfo,
 } from '../utils/time'
 
@@ -12,7 +11,8 @@ interface MonthCalendarProps {
   selectedDate: string | null
   /** 有记录的日期 */
   markedDates: Set<string>
-  timezone: string
+  /** 与归档列表共用父组件的午夜更新，不能在子组件另外取一次今天。 */
+  today: string
   onSelect: (date: string) => void
   onShiftMonth: (delta: number) => void
   onToday: () => void
@@ -35,13 +35,12 @@ export function MonthCalendar({
   info,
   selectedDate,
   markedDates,
-  timezone,
+  today,
   onSelect,
   onShiftMonth,
   onToday,
 }: MonthCalendarProps) {
   const cells = monthGrid(info)
-  const today = todayLocalDate(timezone)
 
   return (
     <div className="card-raised rounded-[16px] px-2 py-3" data-testid="month-calendar">
@@ -95,6 +94,7 @@ export function MonthCalendar({
               key={date}
               type="button"
               onClick={() => onSelect(date)}
+              aria-current={isToday ? 'date' : undefined}
               data-date={date}
               data-testid={`calendar-day-${date}`}
               className="tap tap-active relative mx-auto flex h-11 w-11 items-center justify-center"

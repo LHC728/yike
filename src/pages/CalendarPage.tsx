@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { MonthCalendar } from '../components/MonthCalendar'
 import { RecordRow } from '../components/RecordRow'
 import { useRecordDates, useRecordsOnDate } from '../hooks/useRecords'
+import { useTodayLocalDate } from '../hooks/useToday'
 import { uiActions, useUi } from '../app/uiStore'
 import {
   currentMonth,
@@ -10,7 +11,6 @@ import {
   formatWeekday,
   monthOf,
   shiftMonth,
-  todayLocalDate,
   type MonthInfo,
 } from '../utils/time'
 
@@ -26,12 +26,13 @@ interface PageProps {
  */
 export function CalendarPage({ userId }: PageProps) {
   const timezone = deviceTimeZone()
-  const today = todayLocalDate(timezone)
-  // today 来自 todayLocalDate()，必然合法；currentMonth() 是类型系统要求的降级值
-  const [info, setInfo] = useState<MonthInfo>(() => monthOf(today) ?? currentMonth())
+  const today = useTodayLocalDate(timezone)
+  const [manualMonth, setManualMonth] = useState<MonthInfo | null>(null)
 
   const ui = useUi()
   const selectedDate = ui.selectedDate ?? today
+  // 默认跟随今天；明确选过历史日/月份就固定它，跨午夜不能把用户正在翻看的归档跳走。
+  const info = manualMonth ?? monthOf(selectedDate) ?? currentMonth()
 
   const marked = useRecordDates(userId)
   const records = useRecordsOnDate(userId, selectedDate)
@@ -53,12 +54,16 @@ export function CalendarPage({ userId }: PageProps) {
           info={info}
           selectedDate={selectedDate}
           markedDates={marked}
-          timezone={timezone}
-          onSelect={(date) => uiActions.selectDate(date)}
-          onShiftMonth={(delta) => setInfo((prev) => shiftMonth(prev, delta))}
+          today={today}
+          onSelect={(date) => {
+            setManualMonth(monthOf(date))
+            uiActions.selectDate(date)
+          }}
+          onShiftMonth={(delta) => setManualMonth((previous) => shiftMonth(previous ?? info, delta))}
           onToday={() => {
-            setInfo(monthOf(today) ?? currentMonth())
-            uiActions.selectDate(today)
+            setManualMonth(null)
+            // null 表示动态的今天，不能存下点击时的日期，否则下一午夜仍停在昨天。
+            uiActions.selectDate(null)
           }}
         />
       </div>
