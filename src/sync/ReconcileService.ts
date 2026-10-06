@@ -6,6 +6,7 @@
  *   B. 本机有修改、服务器没动 → 保留本机，准备 Push
  *   C. 两边都动了 → 三方比较（能自动合并就合并，真冲突才打扰用户）
  */
+import { noSessionCheck } from '../cloud/sessionScope'
 import { db } from '../db/db'
 import {
   dropPendingForRecord,
@@ -30,7 +31,20 @@ export interface ReconcileStats {
 }
 
 /** 对账单条服务器记录 */
-export async function reconcileOne(cloud: CloudRecord, stats?: ReconcileStats): Promise<void> {
+export async function reconcileOne(
+  cloud: CloudRecord,
+  stats?: ReconcileStats,
+  checkCurrent: () => void = noSessionCheck,
+): Promise<void> {
+  await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+    checkCurrent()
+    await reconcileCurrent(cloud, stats)
+    // 中间的 IDB await 可能跨过退出登录；抛出后整笔对账回滚。
+    checkCurrent()
+  })
+}
+
+async function reconcileCurrent(cloud: CloudRecord, stats?: ReconcileStats): Promise<void> {
   const local = await db.records.get(cloud.id)
 
   // 本机完全没有这条记录（含服务器上的 Tombstone）→ 直接落地，防止复活
@@ -102,10 +116,11 @@ export async function reconcileOne(cloud: CloudRecord, stats?: ReconcileStats): 
   if (stats) stats.conflicts += 1
 }
 
-export async function reconcileMany(clouds: CloudRecord[]): Promise<ReconcileStats> {
+export async function reconcileMany(clouds: CloudRecord[], checkCurrent: () => void = noSessionCheck): Promise<ReconcileStats> {
   const stats: ReconcileStats = { adopted: 0, keptLocal: 0, autoMerged: 0, conflicts: 0 }
   for (const cloud of clouds) {
-    await reconcileOne(cloud, stats)
+    checkCurrent()
+    await reconcileOne(cloud, stats, checkCurrent)
   }
   return stats
 }

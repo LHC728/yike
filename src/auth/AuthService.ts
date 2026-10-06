@@ -12,7 +12,8 @@
  * 再在后台向服务器确认令牌是否还有效 —— 否则断网就永远拿不到 userId，
  * 「离线正常」这条承诺会直接失效。
  */
-import type { Session } from '@supabase/supabase-js'
+import { invalidateCloudSession, SessionChangedError } from '../cloud/sessionScope'
+import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { getSupabaseClient } from '../cloud/supabaseClient'
 import {
   readCloudConfig,
@@ -32,6 +33,8 @@ export interface AuthUser {
 
 export interface AuthState {
   ready: boolean
+  /** 验证/退出期间保留表单，但禁止旧身份写入和启动同步。 */
+  transitioning: boolean
   mode: AuthMode
   user: AuthUser | null
   cloudConfigured: boolean
@@ -71,24 +74,25 @@ function appBaseUrl(): string | undefined {
   }
 }
 
-class AuthService {
+export class AuthService {
   private listeners = new Set<() => void>()
   private snapshot: AuthState = {
-    ready: false,
-    mode: readCloudConfig() ? 'cloud' : 'local',
-    user: null,
-    cloudConfigured: readCloudConfig() !== null,
-    provider: readCloudConfig()?.provider ?? null,
+    ready: false, transitioning: false, mode: readCloudConfig() ? 'cloud' : 'local', user: null,
+    cloudConfigured: readCloudConfig() !== null, provider: readCloudConfig()?.provider ?? null,
     migratedCount: 0,
   }
   private unsubscribeAuth: (() => void) | null = null
   private initialized = false
+  private revision = 0
+  private lifetime = 0
+  private eventSequence = 0
+  private intentPending = false
+  private pendingSdkWrites = 0
+  private sdkWrites: Promise<void> = Promise.resolve()
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
-    return () => {
-      this.listeners.delete(listener)
-    }
+    return () => { this.listeners.delete(listener) }
   }
 
   getSnapshot = (): AuthState => this.snapshot
@@ -96,88 +100,112 @@ class AuthService {
   private emit(next: Partial<AuthState>): void {
     const merged = { ...this.snapshot, ...next }
     if (
-      merged.ready === this.snapshot.ready &&
-      merged.mode === this.snapshot.mode &&
-      merged.cloudConfigured === this.snapshot.cloudConfigured &&
-      merged.provider === this.snapshot.provider &&
-      merged.migratedCount === this.snapshot.migratedCount &&
-      merged.user?.id === this.snapshot.user?.id &&
+      merged.ready === this.snapshot.ready && merged.transitioning === this.snapshot.transitioning && merged.mode === this.snapshot.mode &&
+      merged.cloudConfigured === this.snapshot.cloudConfigured && merged.provider === this.snapshot.provider &&
+      merged.migratedCount === this.snapshot.migratedCount && merged.user?.id === this.snapshot.user?.id &&
       merged.user?.email === this.snapshot.user?.email
-    ) {
-      return
-    }
+    ) return
+    if (!merged.transitioning) this.intentPending = false
     this.snapshot = merged
     for (const listener of this.listeners) listener()
   }
 
-  /** 应用启动时调用一次 */
+  private beginOperation(kind: 'startup' | 'intent' = 'intent'): { checkCurrent: () => void; previous: AuthState } {
+    const previous = this.snapshot
+    const revision = ++this.revision
+    invalidateCloudSession()
+    this.intentPending = kind === 'intent'
+    // UI 写入守护要马上看到身份正在切换，不能在等待验证时捕获旧账号的新代次。
+    this.emit({ transitioning: true })
+    return {
+      previous,
+      checkCurrent: () => {
+        if (revision !== this.revision) throw new SessionChangedError()
+      },
+    }
+  }
+
+  private restoreAfterFailure(previous: AuthState, checkCurrent: () => void): void {
+    try {
+      checkCurrent()
+      invalidateCloudSession()
+      this.emit({ ...previous, ready: true, transitioning: false })
+    } catch {
+      // 新登录/退出已经接管状态，旧操作的失败不能把界面拉回去。
+    }
+  }
+
+  private async restoreSupabaseAfterFailure(client: SupabaseClient, checkCurrent: () => void): Promise<void> {
+    try {
+      checkCurrent()
+      const { data, error } = await client.auth.getSession()
+      checkCurrent()
+      invalidateCloudSession()
+      // 较早的验证码可能已让 SDK 落盘；后一次失败时不能只恢复旧 UI，造成令牌与账号错配。
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: error ? null : userFromSession(data.session) })
+      await this.adoptLocalRecords(error ? null : data.session?.user.id ?? null, checkCurrent)
+    } catch {
+      try {
+        checkCurrent()
+        invalidateCloudSession()
+        // 本地会话也读不出来时回到可重试登录，不能让未知身份一直锁住界面。
+        this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: null })
+      } catch {
+        // 新操作已接管身份，晚到的失败恢复只允许结束自身。
+      }
+    }
+  }
+
   async init(): Promise<void> {
     if (this.initialized) return
     this.initialized = true
-
+    const { checkCurrent } = this.beginOperation('startup')
     const config = readCloudConfig()
-
-    if (!config) {
-      this.emit({
-        ready: true,
-        mode: 'local',
-        cloudConfigured: false,
-        provider: null,
-        user: { id: LOCAL_USER_ID, email: null },
-      })
-      return
+    try {
+      if (!config) {
+        this.emit({ ready: true, transitioning: false, mode: 'local', cloudConfigured: false, provider: null, user: { id: LOCAL_USER_ID, email: null } })
+      } else if (config.provider === 'cloudflare') {
+        await this.initCloudflare(config.url.replace(/\/+$/, ''), checkCurrent)
+      } else {
+        await this.initSupabase(checkCurrent)
+      }
+    } catch (error) {
+      if (!(error instanceof SessionChangedError)) throw error
     }
-
-    if (config.provider === 'cloudflare') {
-      await this.initCloudflare()
-      return
-    }
-
-    await this.initSupabase()
   }
 
-  // ---------------------------------------------------------------
-  // Cloudflare：访问令牌
-  // ---------------------------------------------------------------
-
-  private async initCloudflare(): Promise<void> {
+  private async initCloudflare(url: string, checkCurrent: () => void): Promise<void> {
     const session = readCloudflareSession()
-
-    if (session === null) {
-      this.emit({
-        ready: true,
-        mode: 'cloud',
-        cloudConfigured: true,
-        provider: 'cloudflare',
-        user: null,
-      })
+    if (!session) {
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'cloudflare', user: null })
       return
     }
-
-    // 先用本机缓存的账号信息立刻可用 —— 断网也照常工作
-    await this.adoptLocalRecords(session.userId)
-    this.emit({
-      ready: true,
-      mode: 'cloud',
-      cloudConfigured: true,
-      provider: 'cloudflare',
-      user: { id: session.userId, email: session.email },
-    })
-
-    // 再在后台确认令牌是否还有效。只有明确的 401 才判定为失效，
-    // 网络错误不算 —— 否则出门断网一次就被踢下线，那是很糟的体验。
+    const checkStoredSession = () => {
+      checkCurrent()
+      const current = readCloudflareSession()
+      const config = readCloudConfig()
+      if (current?.token !== session.token || current.userId !== session.userId || config?.provider !== 'cloudflare' || config.url.replace(/\/+$/, '') !== url) {
+        throw new SessionChangedError()
+      }
+    }
+    this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'cloudflare', user: { id: session.userId, email: session.email } })
+    await this.adoptLocalRecords(session.userId, checkStoredSession)
+    checkStoredSession()
     try {
-      const me = await cfRequest<MeResponse>('/api/me')
+      // 缓存离线可用；后台确认必须固定启动时的地址和令牌，旧 401 也只属于旧会话。
+      const me = await cfRequest<MeResponse>('/api/me', { client: { url, token: session.token } })
+      checkStoredSession()
+      if (me.userId && me.userId !== session.userId) {
+        saveCloudflareSession(null)
+        this.emit({ user: null })
+        return
+      }
       if (me.userId) {
-        saveCloudflareSession({
-          token: session.token,
-          userId: me.userId,
-          email: me.email ?? null,
-        })
-        await this.adoptLocalRecords(me.userId)
+        saveCloudflareSession({ token: session.token, userId: me.userId, email: me.email ?? null })
         this.emit({ user: { id: me.userId, email: me.email ?? null } })
       }
     } catch (error) {
+      checkStoredSession()
       if (error instanceof CloudRequestError && error.status === 401) {
         saveCloudflareSession(null)
         this.emit({ user: null })
@@ -185,93 +213,83 @@ class AuthService {
     }
   }
 
-  /**
-   * 用「Worker 地址 + 访问令牌」登录。
-   *
-   * 顺序很重要：**先验证、再落盘**。
-   * 反过来的话，输错一次令牌就会在本地留下一份坏配置，
-   * 之后每次启动都拿它去请求、每次失败 —— 排查起来很痛苦。
-   */
   async signInWithCloudflare(url: string, token: string): Promise<void> {
     const trimmedUrl = url.trim().replace(/\/+$/, '')
     const trimmedToken = token.trim()
     if (trimmedUrl === '' || trimmedToken === '') throw new Error('missing_credentials')
-
-    const me = await cfRequest<MeResponse>('/api/me', {
-      client: { url: trimmedUrl, token: trimmedToken },
-    })
-    if (!me.userId) throw new Error(me.error ?? 'invalid_token')
-
-    saveCloudConfig({ provider: 'cloudflare', url: trimmedUrl })
-    saveCloudflareSession({
-      token: trimmedToken,
-      userId: me.userId,
-      email: me.email ?? null,
-    })
-
-    await this.adoptLocalRecords(me.userId)
-    this.emit({
-      ready: true,
-      mode: 'cloud',
-      cloudConfigured: true,
-      provider: 'cloudflare',
-      user: { id: me.userId, email: me.email ?? null },
-    })
+    const { checkCurrent, previous } = this.beginOperation()
+    try {
+      const me = await cfRequest<MeResponse>('/api/me', { client: { url: trimmedUrl, token: trimmedToken } })
+      checkCurrent()
+      if (!me.userId) throw new Error(me.error ?? 'invalid_token')
+      saveCloudConfig({ provider: 'cloudflare', url: trimmedUrl })
+      saveCloudflareSession({ token: trimmedToken, userId: me.userId, email: me.email ?? null })
+      // 先发布新身份，使旧 local-device handler 失效；迁移事务随后只允许当前操作提交。
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'cloudflare', user: { id: me.userId, email: me.email ?? null } })
+      await this.adoptLocalRecords(me.userId, checkCurrent)
+      checkCurrent()
+    } catch (error) {
+      this.restoreAfterFailure(previous, checkCurrent)
+      if (!(error instanceof SessionChangedError)) throw error
+    }
   }
 
-  // ---------------------------------------------------------------
-  // Supabase：邮箱验证码
-  // ---------------------------------------------------------------
-
-  private async initSupabase(): Promise<void> {
+  private async initSupabase(checkCurrent: () => void): Promise<void> {
     const client = getSupabaseClient()
-
     if (!client) {
-      this.emit({
-        ready: true,
-        mode: 'local',
-        cloudConfigured: false,
-        provider: null,
-        user: { id: LOCAL_USER_ID, email: null },
-      })
+      this.emit({ ready: true, transitioning: false, mode: 'local', cloudConfigured: false, provider: null, user: { id: LOCAL_USER_ID, email: null } })
       return
     }
-
-    const { data } = await client.auth.getSession()
-    const session = data.session ?? null
-
-    if (session) {
-      await this.adoptLocalRecords(session.user.id)
+    const lifetime = this.lifetime
+    const { data: subscription } = client.auth.onAuthStateChange((_event, session) => {
+      // SDK 的 verifyOtp/signOut 本身会落盘；串行操作结束后由调用方统一发布，避免回调抢先恢复旧身份。
+      if (lifetime !== this.lifetime || this.pendingSdkWrites > 0 || this.intentPending || readCloudConfig()?.provider !== 'supabase') return
+      const sequence = ++this.eventSequence
+      const revision = ++this.revision
+      const nextUser = userFromSession(session)
+      if (nextUser?.id !== this.snapshot.user?.id) invalidateCloudSession()
+      const checkEvent = () => {
+        if (lifetime !== this.lifetime || revision !== this.revision || sequence !== this.eventSequence) throw new SessionChangedError()
+      }
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: nextUser })
+      void this.adoptLocalRecords(nextUser?.id ?? null, checkEvent).catch(() => undefined)
+    })
+    this.unsubscribeAuth = () => subscription.subscription.unsubscribe()
+    const eventSequence = this.eventSequence
+    const { data, error } = await client.auth.getSession()
+    checkCurrent()
+    if (eventSequence !== this.eventSequence) return
+    if (error) {
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: null })
+      return
     }
-
-    this.emit({
-      ready: true,
-      mode: 'cloud',
-      cloudConfigured: true,
-      provider: 'supabase',
-      user: userFromSession(session),
-    })
-
-    const { data: sub } = client.auth.onAuthStateChange((_event, nextSession) => {
-      const nextUser = userFromSession(nextSession)
-      void this.adoptLocalRecords(nextUser?.id ?? null).then(() => {
-        this.emit({ user: nextUser })
-      })
-    })
-    this.unsubscribeAuth = () => sub.subscription.unsubscribe()
+    const session = data.session ?? null
+    this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: userFromSession(session) })
+    await this.adoptLocalRecords(session?.user.id ?? null, checkCurrent)
   }
 
-  // ---------------------------------------------------------------
-  // 公共
-  // ---------------------------------------------------------------
-
-  private async adoptLocalRecords(userId: string | null): Promise<void> {
+  private async adoptLocalRecords(userId: string | null, checkCurrent: () => void): Promise<void> {
+    checkCurrent()
     if (!userId) return
     try {
-      const count = await migrateLocalRecordsToUser(userId)
+      const count = await migrateLocalRecordsToUser(userId, checkCurrent)
+      checkCurrent()
       if (count > 0) this.emit({ migratedCount: count })
-    } catch {
-      // 迁移失败不阻塞登录
+    } catch (error) {
+      checkCurrent()
+      if (error instanceof SessionChangedError) throw error
+      // 普通迁移失败不阻塞登录；原事务回滚，本机记录和 outbox 仍完整保留。
+    }
+  }
+
+  private async serializeSdk<T>(work: () => Promise<T>): Promise<T> {
+    this.pendingSdkWrites += 1
+    const next = this.sdkWrites.catch(() => undefined).then(work)
+    this.sdkWrites = next.then(() => undefined, () => undefined)
+    try {
+      return await next
+    } finally {
+      this.pendingSdkWrites -= 1
     }
   }
 
@@ -279,52 +297,69 @@ class AuthService {
     this.emit({ migratedCount: 0 })
   }
 
-  /** 发送邮箱验证码（仅 Supabase） */
   async sendEmailCode(email: string): Promise<void> {
     const client = getSupabaseClient()
     if (!client) throw new Error('cloud_not_configured')
-    // 拿不到地址时干脆不传这个参数 —— 传一个假的相对地址反而会让服务端拒绝
     const redirectTo = appBaseUrl()
-    const { error } = await client.auth.signInWithOtp({
-      email: email.trim(),
-      options: {
-        shouldCreateUser: true,
-        ...(redirectTo === undefined ? {} : { emailRedirectTo: redirectTo }),
-      },
-    })
+    const { error } = await client.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: true, ...(redirectTo === undefined ? {} : { emailRedirectTo: redirectTo }) } })
     if (error) throw new Error(error.message)
   }
 
-  /** 校验邮箱验证码（仅 Supabase） */
   async verifyEmailCode(email: string, token: string): Promise<void> {
     const client = getSupabaseClient()
     if (!client) throw new Error('cloud_not_configured')
-    const { data, error } = await client.auth.verifyOtp({
-      email: email.trim(),
-      token: token.trim(),
-      type: 'email',
-    })
-    if (error) throw new Error(error.message)
-    if (data.user) await this.adoptLocalRecords(data.user.id)
-    this.emit({ user: userFromSession(data.session) })
+    const { checkCurrent } = this.beginOperation()
+    try {
+      const { data, error } = await this.serializeSdk(async () => {
+        checkCurrent()
+        return client.auth.verifyOtp({ email: email.trim(), token: token.trim(), type: 'email' })
+      })
+      checkCurrent()
+      if (error) throw new Error(error.message)
+      this.emit({ ready: true, transitioning: false, mode: 'cloud', cloudConfigured: true, provider: 'supabase', user: userFromSession(data.session) })
+      await this.adoptLocalRecords(data.user?.id ?? null, checkCurrent)
+    } catch (error) {
+      await this.restoreSupabaseAfterFailure(client, checkCurrent)
+      if (!(error instanceof SessionChangedError)) throw error
+    }
   }
 
   async signOut(): Promise<void> {
-    if (this.snapshot.provider === 'cloudflare') {
-      // 只清会话，保留连接配置 —— 否则会被判为「未配置」而掉回本机模式
-      saveCloudflareSession(null)
-      this.emit({ user: null })
-      return
-    }
-
+    const provider = this.snapshot.provider
     const client = getSupabaseClient()
-    if (client) await client.auth.signOut()
-    this.emit({ user: null })
+    const { checkCurrent, previous } = this.beginOperation()
+    try {
+      if (provider === 'cloudflare') {
+        saveCloudflareSession(null)
+        this.emit({ ready: true, transitioning: false, user: null })
+        return
+      }
+      this.emit({ user: null })
+      if (client) {
+        const { error } = await this.serializeSdk(async () => {
+          checkCurrent()
+          return client.auth.signOut()
+        })
+        checkCurrent()
+        if (error) throw new Error(error.message)
+      }
+      checkCurrent()
+      this.emit({ ready: true, transitioning: false, user: null })
+    } catch (error) {
+      if (client) await this.restoreSupabaseAfterFailure(client, checkCurrent)
+      else this.restoreAfterFailure(previous, checkCurrent)
+      if (!(error instanceof SessionChangedError)) throw error
+    }
   }
 
   dispose(): void {
+    this.lifetime += 1
+    this.revision += 1
+    this.eventSequence += 1
+    invalidateCloudSession()
     this.unsubscribeAuth?.()
     this.unsubscribeAuth = null
+    this.initialized = false
   }
 }
 

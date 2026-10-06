@@ -4,6 +4,7 @@
  * 依赖方向：UI → Repository/Domain → IndexedDB → SyncEngine → CloudAdapter → Supabase
  * React 页面绝不直接调用 Supabase。
  */
+import type { SessionScope } from './sessionScope'
 import type { CloudRecord } from '../domain/record'
 import type { Mutation, MutationOperation } from '../domain/mutation'
 
@@ -30,6 +31,8 @@ export interface ApplyMutationResult {
 
 export interface CloudAdapter {
   readonly kind: string
+  /** 每轮冻结连接、身份和令牌，SDK 单例的后续登录不能影响本轮请求。 */
+  bindSession?(userId: string, scope: SessionScope): Promise<CloudAdapter>
   /** 是否已配置且可用 */
   isConfigured(): boolean
   /** 拉取该用户全部 Record（含软删除 Tombstone，§46） */

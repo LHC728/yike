@@ -21,7 +21,10 @@ export default function App() {
 
   // 账号就绪后启动同步引擎
   useEffect(() => {
-    if (!auth.ready) return
+    if (!auth.ready || auth.transitioning) {
+      syncEngine.stop()
+      return
+    }
     syncEngine.configure({
       adapter: createCloudAdapter(),
       userId,
@@ -29,7 +32,7 @@ export default function App() {
     })
     syncEngine.start()
     return () => syncEngine.stop()
-  }, [auth.ready, auth.mode, userId])
+  }, [auth.ready, auth.transitioning, auth.mode, userId])
 
   // 从本机模式并入账号时，明确告诉用户数据还在
   useEffect(() => {

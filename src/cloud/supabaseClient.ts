@@ -3,7 +3,8 @@
  * AuthService 与 SupabaseAdapter 共用同一个 client。
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import { readCloudConfig } from './cloudConfig'
+import type { SessionScope } from './sessionScope'
+import { readCloudConfig, type SupabaseCloudConfig } from './cloudConfig'
 
 let cached: { url: string; key: string; client: SupabaseClient } | null = null
 
@@ -31,4 +32,27 @@ export function getSupabaseClient(): SupabaseClient | null {
 
 export function resetSupabaseClient(): void {
   cached = null
+}
+
+/** 同步客户端绝不共享 AuthService 的可变会话，A 的 RPC 永远带 A 的令牌。 */
+export function createSessionSupabaseClient(
+  config: SupabaseCloudConfig,
+  accessToken: string,
+  scope: SessionScope,
+): SupabaseClient {
+  return createClient(config.url, config.anonKey, {
+    accessToken: async () => {
+      scope.checkCurrent()
+      return accessToken
+    },
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    global: {
+      fetch: async (input, init) => {
+        scope.checkCurrent()
+        const response = await fetch(input, { ...init, signal: scope.signal })
+        scope.checkCurrent()
+        return response
+      },
+    },
+  })
 }

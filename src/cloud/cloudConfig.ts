@@ -1,3 +1,5 @@
+import { invalidateCloudSession } from './sessionScope'
+
 /**
  * 云端连接配置。
  *
@@ -98,6 +100,7 @@ export function readEnvCloudConfig(): CloudConfig | null {
 }
 
 export function saveCloudConfig(config: CloudConfig | null): void {
+  if (JSON.stringify(config) !== JSON.stringify(readCloudConfig())) invalidateCloudSession()
   try {
     if (config === null) {
       globalThis.localStorage?.removeItem(STORAGE_KEY)

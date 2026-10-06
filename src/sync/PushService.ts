@@ -5,6 +5,7 @@
  * - 每个 Mutation 带 mutationId，服务端保证幂等，重试不会重复执行（§41）
  * - 遇到 version_conflict 立即停下，交给 Reconcile 做三方比较，绝不静默覆盖
  */
+import { noSessionCheck } from '../cloud/sessionScope'
 import { mutationToParams, type CloudAdapter } from '../cloud/CloudAdapter'
 import { db } from '../db/db'
 import {
@@ -28,18 +29,21 @@ export interface PushStats {
 }
 
 /** 上次运行中途被打断留下的 sending 状态，回到 pending 重新发送（幂等保证安全） */
-export async function resetStaleSending(userId: string): Promise<void> {
-  await db.outbox
-    .where('[userId+state]')
-    .equals([userId, 'sending'])
-    .modify({ state: 'pending', attempted: true })
+export async function resetStaleSending(userId: string, checkCurrent: () => void = noSessionCheck): Promise<void> {
+  await db.transaction('rw', db.outbox, async () => {
+    checkCurrent()
+    await db.outbox.where('[userId+state]').equals([userId, 'sending']).modify({ state: 'pending', attempted: true })
+    checkCurrent()
+  })
 }
 
-export async function pushPending(adapter: CloudAdapter, userId: string): Promise<PushStats> {
+export async function pushPending(adapter: CloudAdapter, userId: string, checkCurrent: () => void = noSessionCheck): Promise<PushStats> {
   const stats: PushStats = { pushed: 0, conflicts: 0, failed: 0 }
   if (!adapter.isConfigured()) return stats
 
+  checkCurrent()
   const mutations = await listAllPending(userId)
+  checkCurrent()
   if (mutations.length === 0) return stats
 
   const grouped = new Map<string, Mutation[]>()
@@ -51,7 +55,7 @@ export async function pushPending(adapter: CloudAdapter, userId: string): Promis
 
   const settled = await Promise.allSettled(
     Array.from(grouped.entries()).map(([recordId, list]) =>
-      pushRecord(adapter, userId, recordId, list, stats),
+      pushRecord(adapter, userId, recordId, list, stats, checkCurrent),
     ),
   )
 
@@ -71,48 +75,55 @@ async function pushRecord(
   recordId: string,
   mutations: Mutation[],
   stats: PushStats,
+  checkCurrent: () => void,
 ): Promise<void> {
   for (const candidate of mutations) {
-    const mutation = await claimMutation(candidate.mutationId, userId)
+    checkCurrent()
+    const mutation = await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+      checkCurrent()
+      const claimed = await claimMutation(candidate.mutationId, userId)
+      checkCurrent()
+      return claimed
+    })
+    checkCurrent()
     if (!mutation) continue
 
     let result
     try {
       result = await adapter.applyMutation(userId, mutationToParams(mutation))
     } catch (error) {
-      await markFailed(mutation.mutationId, mutation.retryCount + 1)
-      await db.records.where('id').equals(recordId).modify((row) => {
-        row.syncState = 'error'
+      checkCurrent()
+      await db.transaction('rw', db.records, db.outbox, async () => {
+        checkCurrent()
+        await markFailed(mutation.mutationId, mutation.retryCount + 1)
+        await db.records.where('id').equals(recordId).modify((row) => { row.syncState = 'error' })
+        checkCurrent()
       })
       stats.failed += 1
       throw error
     }
 
-    if (result.status === 'applied' || result.status === 'already_applied') {
-      // 确认旧包与下一包重基一起提交，不能让并发推送领取到仍带旧版本的下一包。
-      await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+    checkCurrent()
+    const keepSending = await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+      checkCurrent()
+      let next = false
+      if (result.status === 'applied' || result.status === 'already_applied') {
         await removeMutation(mutation.mutationId)
-        if (result.record) {
-          await reconcileOne(result.record)
-        } else if (result.version !== null) {
-          await setServerVersion(recordId, result.version)
-        }
-      })
-      stats.pushed += 1
-      continue
-    }
-
-    if (result.status === 'version_conflict') {
-      // 交给 Reconcile：可能是不同字段的安全合并，也可能是真冲突
-      await markPending(mutation.mutationId)
-      stats.conflicts += 1
-      return
-    }
-
-    // record_not_found：服务端没有这条记录（例如本机被清过、create 丢包）
-    // 改成 create 重新走一遍，宁可多保存也不丢数据
-    await promoteToCreate(recordId)
-    return
+        if (result.record) await reconcileOne(result.record, undefined, checkCurrent)
+        else if (result.version !== null) await setServerVersion(recordId, result.version)
+        stats.pushed += 1
+        next = true
+      } else if (result.status === 'version_conflict') {
+        await markPending(mutation.mutationId)
+        stats.conflicts += 1
+      } else {
+        await promoteToCreate(recordId)
+      }
+      // 已应用但会话随后失效也必须回滚本地出队，回到 A 后用原 mutationId 幂等确认。
+      checkCurrent()
+      return next
+    })
+    if (!keepSending) return
   }
 }
 

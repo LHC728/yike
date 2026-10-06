@@ -402,14 +402,17 @@ export async function countRecords(userId: string): Promise<number> {
  * 把本机（未登录）创建的记录归入某个账号。
  * 这些记录从未上过服务器，因此重置 serverVersion 并改用 create Mutation。
  */
-export async function migrateLocalRecordsToUser(targetUserId: string): Promise<number> {
+export async function migrateLocalRecordsToUser(targetUserId: string, checkCurrent: () => void = () => undefined): Promise<number> {
   let migrated = 0
 
   await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+    checkCurrent()
     const locals = await db.records.where('userId').equals(LOCAL_USER_ID).toArray()
+    checkCurrent()
     if (locals.length === 0) return
 
     for (const record of locals) {
+      checkCurrent()
       await db.outbox.where('recordId').equals(record.id).delete()
       await db.conflicts.delete(record.id)
 
@@ -429,8 +432,10 @@ export async function migrateLocalRecordsToUser(targetUserId: string): Promise<n
         state: 'pending',
         attempted: false,
       })
+      checkCurrent()
       migrated += 1
     }
+    checkCurrent()
   })
 
   return migrated

@@ -10,7 +10,8 @@
 import type { CloudRecord, RecordType } from '../domain/record'
 import { clampDeadlineLocalDate, clampParentId, clampProgress, clampRecordType } from '../domain/record'
 import type { ApplyMutationParams, ApplyMutationResult, CloudAdapter } from './CloudAdapter'
-import { cfRequest, getCloudflareClient } from './cloudflareClient'
+import { SessionChangedError, type SessionScope } from './sessionScope'
+import { cfRequest, getCloudflareClient, type CloudflareClient } from './cloudflareClient'
 
 type Row = Record<string, unknown>
 
@@ -51,37 +52,76 @@ function toCloud(row: Row): CloudRecord {
 
 export class CloudflareAdapter implements CloudAdapter {
   readonly kind = 'cloudflare'
+  private fixed: { client: CloudflareClient; owner: string; scope: SessionScope } | null
 
-  isConfigured(): boolean {
-    return getCloudflareClient() !== null
+  constructor(fixed: { client: CloudflareClient; owner: string; scope: SessionScope } | null = null) {
+    this.fixed = fixed
   }
 
-  /**
-   * 拉取全部记录。
-   *
-   * userId 用不上 —— 服务端从令牌就能确定身份，多传一个反而是个
-   * 「客户端说是谁就是谁」的口子。但签名必须与 CloudAdapter 一致，
-   * 否则调用方按接口传参会在类型层面报错。
-   */
-  async pullAll(_userId: string): Promise<CloudRecord[]> {
-    const data = await cfRequest<{ records?: Row[] }>('/api/sync/pull', { method: 'POST' })
+  async bindSession(userId: string, scope: SessionScope): Promise<CloudAdapter> {
+    scope.checkCurrent()
+    const client = getCloudflareClient()
+    if (!client) throw new Error('cloud_not_configured')
+    if (client.userId !== userId) throw new SessionChangedError()
+    const frozen = { ...client }
+    const boundScope: SessionScope = {
+      signal: scope.signal,
+      checkCurrent: () => {
+        scope.checkCurrent()
+        const current = getCloudflareClient()
+        // 另一个标签页直接改变存储时，本页尚未收到 React 清理，也不能接受旧响应。
+        if (current?.url !== frozen.url || current.token !== frozen.token || current.userId !== userId) {
+          throw new SessionChangedError()
+        }
+      },
+    }
+    return new CloudflareAdapter({ client: frozen, owner: userId, scope: boundScope })
+  }
+
+  private requestOptions(userId: string): { client: CloudflareClient; signal?: AbortSignal } {
+    if (this.fixed) {
+      this.fixed.scope.checkCurrent()
+      if (this.fixed.owner !== userId) throw new SessionChangedError()
+      return { client: this.fixed.client, signal: this.fixed.scope.signal }
+    }
+    const client = getCloudflareClient()
+    if (!client) throw new Error('cloud_not_configured')
+    if (client.userId !== userId) throw new SessionChangedError()
+    return { client }
+  }
+
+  private checkResponse(): void {
+    this.fixed?.scope.checkCurrent()
+  }
+
+  isConfigured(): boolean {
+    return this.fixed !== null || getCloudflareClient() !== null
+  }
+
+  /** 服务端仍从令牌识别身份；客户端账号校验只负责防止混用会话。 */
+  async pullAll(userId: string): Promise<CloudRecord[]> {
+    const data = await cfRequest<{ records?: Row[] }>('/api/sync/pull', { method: 'POST', ...this.requestOptions(userId) })
+    this.checkResponse()
     const rows = data.records ?? []
     return rows.map(toCloud)
   }
 
-  async pullOne(_userId: string, recordId: string): Promise<CloudRecord | null> {
+  async pullOne(userId: string, recordId: string): Promise<CloudRecord | null> {
     const data = await cfRequest<{ record?: Row | null }>(
       `/api/sync/record?id=${encodeURIComponent(recordId)}`,
+      this.requestOptions(userId),
     )
+    this.checkResponse()
     return data.record ? toCloud(data.record) : null
   }
 
-  async applyMutation(_userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
+  async applyMutation(userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
     const data = await cfRequest<{
       status?: string
       version?: number | string | null
       record?: Row | null
     }>('/api/sync/mutate', {
+      ...this.requestOptions(userId),
       method: 'POST',
       body: {
         mutationId: params.mutationId,
@@ -92,6 +132,7 @@ export class CloudflareAdapter implements CloudAdapter {
       },
     })
 
+    this.checkResponse()
     const status =
       data.status === 'already_applied' ||
       data.status === 'version_conflict' ||

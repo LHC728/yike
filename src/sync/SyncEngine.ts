@@ -1,11 +1,7 @@
-/**
- * SyncEngine（方案 §44 - §46、§54 - §57、§65 - §67）。
- *
- * 顺序固定为：Pull → Reconcile → Push → Pull / 应用服务器返回结果
- * 绝不采用简单的 Push → Pull，也绝不采用 Last Write Wins。
- */
+/** 同步顺序固定为 Pull → Reconcile → Push → Pull，旧会话只能结束自己的任务。 */
 import type { CloudAdapter } from '../cloud/CloudAdapter'
 import { createCloudAdapter } from '../cloud/cloudProvider'
+import { cloudSessionRevision, SessionChangedError, type SessionScope } from '../cloud/sessionScope'
 import type { AuthMode } from '../auth/AuthService'
 import { pullAll, pullOne } from './PullService'
 import { reconcileMany, reconcileOne } from './ReconcileService'
@@ -15,7 +11,6 @@ import { NetworkWatcher, isOnline, type SyncTriggerReason } from './NetworkWatch
 import { FRIENDLY_SYNC_ERROR, syncStatusStore } from './syncStatus'
 import { nowIso } from '../utils/time'
 
-/** 退避阶梯（§67）：之后不再无限高频请求 */
 const BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000]
 
 interface EngineConfig {
@@ -24,27 +19,69 @@ interface EngineConfig {
   mode: AuthMode
 }
 
-class SyncEngine {
+interface RunContext extends SessionScope {
+  userId: string
+  source: CloudAdapter
+  controller: AbortController
+}
+
+export class SyncEngine {
   private adapter: CloudAdapter = createCloudAdapter()
   private userId: string | null = null
   private mode: AuthMode = 'local'
-
-  private running = false
+  private generation = 0
+  private activeRun: RunContext | null = null
+  private pendingSync = new Set<Promise<void>>()
+  private pendingRealtime = new Set<Promise<void>>()
+  private controllers = new Set<AbortController>()
   private rerunRequested = false
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private backoffIndex = 0
   private lastFullSyncAt = 0
   private started = false
-  /** 在途的 Realtime 处理任务，用于「等待收敛」 */
-  private pendingRealtime = new Set<Promise<void>>()
-
   private realtime = new RealtimeService()
   private network = new NetworkWatcher()
-
-  /** 供 UI / 测试观察 */
   onAfterSync: (() => void) | null = null
 
+  private isCurrent(context: RunContext): boolean {
+    try {
+      context.checkCurrent()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private context(): RunContext | null {
+    const userId = this.userId
+    if (!userId || !this.adapter.isConfigured()) return null
+    const source = this.adapter
+    const generation = this.generation
+    const authRevision = cloudSessionRevision()
+    const controller = new AbortController()
+    this.controllers.add(controller)
+    return {
+      userId, source, controller, signal: controller.signal,
+      checkCurrent: () => {
+        if (controller.signal.aborted || generation !== this.generation || authRevision !== cloudSessionRevision()) {
+          throw new SessionChangedError()
+        }
+      },
+    }
+  }
+
+  private invalidate(): void {
+    this.generation += 1
+    for (const controller of this.controllers) controller.abort()
+    this.activeRun = null
+    this.rerunRequested = false
+    this.backoffIndex = 0
+    this.clearRetry()
+    this.realtime.stop()
+  }
+
   configure(config: Partial<EngineConfig>): void {
+    this.invalidate()
     if (config.adapter) this.adapter = config.adapter
     if ('userId' in config) this.userId = config.userId ?? null
     if (config.mode) this.mode = config.mode
@@ -68,74 +105,63 @@ class SyncEngine {
 
   stop(): void {
     this.started = false
-    this.running = false
-    this.rerunRequested = false
-    this.pendingRealtime.clear()
+    this.invalidate()
     this.network.stop()
-    this.realtime.stop()
-    this.clearRetry()
+    // 保留真实任务集合，waitIdle 不能把尚未返回的网络请求谎报为空闲。
   }
 
-  /** 云端未配置 / 未登录时，明确告诉 UI 当前处于什么状态 */
   private refreshIdlePhase(): void {
     if (!this.adapter.isConfigured()) {
       syncStatusStore.set({ phase: 'local', message: null })
-      return
-    }
-    if (this.mode === 'cloud' && !this.userId) {
+    } else if (this.mode === 'cloud' && !this.userId) {
       syncStatusStore.set({ phase: 'signed-out', message: null })
-      return
-    }
-    if (!this.running) {
-      syncStatusStore.set({ phase: syncStatusStore.getSnapshot().phase === 'local' ? 'idle' : syncStatusStore.getSnapshot().phase })
+    } else if (!this.activeRun) {
+      syncStatusStore.set({ phase: 'idle', message: null })
     }
   }
 
   private refreshRealtime(): void {
-    if (!this.adapter.isConfigured() || !this.userId) {
-      this.realtime.stop()
-      return
-    }
+    if (!this.adapter.isConfigured() || !this.userId) return
+    const generation = this.generation
+    const revision = cloudSessionRevision()
     this.realtime.start(this.adapter, this.userId, (recordId) => {
-      this.handleRealtimeHit(recordId)
+      if (generation !== this.generation || revision !== cloudSessionRevision()) return
+      const context = this.context()
+      if (!context) return
+      const task = this.runRealtimeHit(context, recordId).finally(() => {
+        this.pendingRealtime.delete(task)
+        this.controllers.delete(context.controller)
+      })
+      this.pendingRealtime.add(task)
     })
   }
 
-  /**
-   * Realtime 命中：只做一次定点 Pull + Reconcile。
-   * 即使这条事件丢了，下一次完整 sync 也能补回来（§55）。
-   */
-  private handleRealtimeHit(recordId: string): void {
-    const task = this.runRealtimeHit(recordId).finally(() => {
-      this.pendingRealtime.delete(task)
-    })
-    this.pendingRealtime.add(task)
+  private async bound(context: RunContext): Promise<CloudAdapter> {
+    context.checkCurrent()
+    const adapter = context.source.bindSession
+      ? await context.source.bindSession(context.userId, context)
+      : context.source
+    context.checkCurrent()
+    return adapter
   }
 
-  private async runRealtimeHit(recordId: string): Promise<void> {
-    if (!this.userId || !this.adapter.isConfigured()) return
+  private async runRealtimeHit(context: RunContext, recordId: string): Promise<void> {
     try {
-      const cloud = await pullOne(this.adapter, this.userId, recordId)
-      if (cloud) await reconcileOne(cloud)
-      // Realtime 之后可能还有本机待发送改动
+      const adapter = await this.bound(context)
+      const cloud = await pullOne(adapter, context.userId, recordId)
+      context.checkCurrent()
+      if (cloud) await reconcileOne(cloud, undefined, context.checkCurrent)
+      context.checkCurrent()
       void this.sync('realtime')
     } catch {
-      // 忽略：最终一致性由 Pull 保证
+      // Realtime 只是加速器，完整 Pull 会补齐；旧会话不再操作本地库。
     }
   }
 
-  /**
-   * 等待同步彻底收敛（当前同步 + 排队中的同步 + 在途 Realtime 处理）。
-   * 供测试与「立即同步」按钮确认结果使用。
-   */
   async waitIdle(timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
-      if (this.pendingRealtime.size > 0) {
-        await Promise.allSettled(Array.from(this.pendingRealtime))
-        continue
-      }
-      if (!this.running && !this.rerunRequested) return
+      if (this.pendingSync.size === 0 && this.pendingRealtime.size === 0 && !this.rerunRequested) return
       await new Promise((resolve) => setTimeout(resolve, 5))
     }
   }
@@ -149,85 +175,74 @@ class SyncEngine {
       syncStatusStore.set({ phase: 'signed-out', message: null })
       return
     }
-    if (this.running) {
+    if (this.activeRun && this.isCurrent(this.activeRun)) {
       this.rerunRequested = true
       return
     }
-
-    this.running = true
-    syncStatusStore.set({
-      phase: 'syncing',
-      message: null,
-      online: isOnline(),
-    })
-
+    const context = this.context()
+    if (!context) return
+    this.activeRun = context
+    syncStatusStore.set({ phase: 'syncing', message: null, online: isOnline() })
+    const task = this.execute(context)
+    this.pendingSync.add(task)
     try {
-      await this.runSync()
+      await task
+    } finally {
+      this.pendingSync.delete(task)
+      this.controllers.delete(context.controller)
+    }
+  }
+
+  private async execute(context: RunContext): Promise<void> {
+    try {
+      await this.runSync(context)
+      context.checkCurrent()
       this.backoffIndex = 0
       this.lastFullSyncAt = Date.now()
-      syncStatusStore.set({
-        phase: 'synced',
-        message: null,
-        lastSyncedAt: nowIso(),
-        online: true,
-        failureCount: 0,
-      })
+      syncStatusStore.set({ phase: 'synced', message: null, lastSyncedAt: nowIso(), online: true, failureCount: 0 })
       this.onAfterSync?.()
-    } catch (error) {
+    } catch {
+      if (!this.isCurrent(context)) return
       const online = isOnline()
-      const failureCount = this.backoffIndex + 1
-      syncStatusStore.set({
-        phase: online ? 'error' : 'offline',
-        // 用户只需要知道最重要的信息：内容还在本机（§66）
-        message: online ? FRIENDLY_SYNC_ERROR : null,
-        online,
-        failureCount,
-      })
+      syncStatusStore.set({ phase: online ? 'error' : 'offline', message: online ? FRIENDLY_SYNC_ERROR : null, online, failureCount: this.backoffIndex + 1 })
       this.scheduleRetry()
-      void error
     } finally {
-      this.running = false
-      if (this.rerunRequested) {
+      // 旧任务的 finally 晚到时，新账号可能已经在同步；不能清它的锁或发起它的重跑。
+      if (this.activeRun === context) {
+        this.activeRun = null
+        const rerun = this.rerunRequested && this.isCurrent(context)
         this.rerunRequested = false
-        // sync() 会在第一个 await 之前同步把 running 置回 true，不存在空窗
-        void this.sync('local-change')
+        if (rerun) void this.sync('local-change')
       }
     }
   }
 
-  /** Pull → Reconcile → Push → Pull */
-  private async runSync(): Promise<void> {
-    const userId = this.userId
-    if (!userId) return
-
-    await resetStaleSending(userId)
-
-    // 1) Pull：先拿服务器最新状态（§45）
-    const clouds = await pullAll(this.adapter, userId)
-
-    // 2) Reconcile：决定采用 / 保留本机 / 自动合并 / 冲突
-    await reconcileMany(clouds)
-
-    // 3) Push：把本机改动送上去
+  private async runSync(context: RunContext): Promise<void> {
+    const adapter = await this.bound(context)
+    const { userId, checkCurrent } = context
+    await resetStaleSending(userId, checkCurrent)
+    checkCurrent()
+    const clouds = await pullAll(adapter, userId)
+    checkCurrent()
+    await reconcileMany(clouds, checkCurrent)
     let pushError: unknown = null
     try {
-      await pushPending(this.adapter, userId)
+      await pushPending(adapter, userId, checkCurrent)
     } catch (error) {
       pushError = error
     }
-
-    // 4) 再 Pull 一次，应用服务器返回结果并补齐可能的遗漏
-    const after = await pullAll(this.adapter, userId)
-    await reconcileMany(after)
-
+    checkCurrent()
+    const after = await pullAll(adapter, userId)
+    checkCurrent()
+    await reconcileMany(after, checkCurrent)
+    checkCurrent()
     if (pushError) throw pushError
   }
 
   private scheduleRetry(): void {
     this.clearRetry()
-    if (!this.started) return
+    if (!this.started || this.backoffIndex >= BACKOFF_MS.length) return
     const delay = BACKOFF_MS[Math.min(this.backoffIndex, BACKOFF_MS.length - 1)]
-    if (this.backoffIndex >= BACKOFF_MS.length) return // 不再无限高频请求
     this.backoffIndex += 1
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null
@@ -236,16 +251,12 @@ class SyncEngine {
   }
 
   private clearRetry(): void {
-    if (this.retryTimer) {
-      clearTimeout(this.retryTimer)
-      this.retryTimer = null
-    }
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
   }
 
-  /** 本地发生写入后调用，做一次轻量同步（带节流） */
   notifyLocalChange(): void {
-    if (!this.started) return
-    void this.sync('local-change')
+    if (this.started) void this.sync('local-change')
   }
 
   get lastSyncAt(): number {

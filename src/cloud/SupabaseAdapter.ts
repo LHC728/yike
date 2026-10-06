@@ -12,7 +12,10 @@ import type {
   ApplyMutationResult,
   CloudAdapter,
 } from './CloudAdapter'
-import { getSupabaseClient } from './supabaseClient'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { readCloudConfig } from './cloudConfig'
+import { SessionChangedError, type SessionScope } from './sessionScope'
+import { createSessionSupabaseClient, getSupabaseClient } from './supabaseClient'
 
 const COLUMNS = [
   'id',
@@ -72,19 +75,52 @@ const PAGE_SIZE = 500
 
 export class SupabaseAdapter implements CloudAdapter {
   readonly kind = 'supabase'
+  private fixed: { client: SupabaseClient; owner: string; scope: SessionScope } | null
 
-  isConfigured(): boolean {
-    return getSupabaseClient() !== null
+  constructor(fixed: { client: SupabaseClient; owner: string; scope: SessionScope } | null = null) {
+    this.fixed = fixed
   }
 
-  private client() {
+  async bindSession(userId: string, scope: SessionScope): Promise<CloudAdapter> {
+    scope.checkCurrent()
+    const config = readCloudConfig()
     const client = getSupabaseClient()
-    if (!client) throw new Error('cloud_not_configured')
-    return client
+    if (!client || config?.provider !== 'supabase') throw new Error('cloud_not_configured')
+    const { data, error } = await client.auth.getSession()
+    scope.checkCurrent()
+    const session = data.session
+    if (error) throw new Error(error.message)
+    if (!session || session.user.id !== userId) throw new SessionChangedError()
+    const current = readCloudConfig()
+    if (current?.provider !== 'supabase' || current.url !== config.url || current.anonKey !== config.anonKey) {
+      throw new SessionChangedError()
+    }
+    const frozen = createSessionSupabaseClient(config, session.access_token, scope)
+    return new SupabaseAdapter({ client: frozen, owner: userId, scope })
+  }
+
+  isConfigured(): boolean {
+    return this.fixed !== null || getSupabaseClient() !== null
+  }
+
+  private async client(userId: string): Promise<SupabaseClient> {
+    if (this.fixed) {
+      this.fixed.scope.checkCurrent()
+      if (this.fixed.owner !== userId) throw new SessionChangedError()
+      return this.fixed.client
+    }
+    const controller = new AbortController()
+    const bound = await this.bindSession(userId, { checkCurrent: () => undefined, signal: controller.signal })
+    if (!(bound instanceof SupabaseAdapter) || !bound.fixed) throw new Error('cloud_not_configured')
+    return bound.fixed.client
+  }
+
+  private checkResponse(): void {
+    this.fixed?.scope.checkCurrent()
   }
 
   async pullAll(userId: string): Promise<CloudRecord[]> {
-    const client = this.client()
+    const client = await this.client(userId)
     const result: CloudRecord[] = []
 
     for (let from = 0; from < 200000; from += PAGE_SIZE) {
@@ -95,6 +131,7 @@ export class SupabaseAdapter implements CloudAdapter {
         .order('server_updated_at', { ascending: true })
         .range(from, from + PAGE_SIZE - 1)
 
+      this.checkResponse()
       if (error) throw new Error(error.message)
       const rows = (data ?? []) as unknown as Row[]
       for (const row of rows) result.push(toCloud(row))
@@ -105,20 +142,21 @@ export class SupabaseAdapter implements CloudAdapter {
   }
 
   async pullOne(userId: string, recordId: string): Promise<CloudRecord | null> {
-    const client = this.client()
+    const client = await this.client(userId)
     const { data, error } = await client
       .from('records')
       .select(COLUMNS)
       .eq('user_id', userId)
       .eq('id', recordId)
       .maybeSingle()
+    this.checkResponse()
     if (error) throw new Error(error.message)
     if (!data) return null
     return toCloud(data as unknown as Row)
   }
 
-  async applyMutation(_userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
-    const client = this.client()
+  async applyMutation(userId: string, params: ApplyMutationParams): Promise<ApplyMutationResult> {
+    const client = await this.client(userId)
     const { data, error } = await client.rpc('apply_record_mutation', {
       p_mutation_id: params.mutationId,
       p_record_id: params.recordId,
@@ -127,6 +165,7 @@ export class SupabaseAdapter implements CloudAdapter {
       p_payload: params.payload,
     })
 
+    this.checkResponse()
     if (error) throw new Error(error.message)
 
     const payload = (data ?? {}) as {

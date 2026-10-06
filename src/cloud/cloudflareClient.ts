@@ -2,8 +2,7 @@
  * Cloudflare Worker 的 HTTP 客户端。
  * AuthService 与 CloudflareAdapter 共用同一份配置。
  *
- * 这里不做任何缓存：令牌可能随时被用户在「设置」里改掉，
- * 缓存住反而会让人以为「改了没生效」。
+ * 每次绑定同步会话时读取最新凭据；一次同步内使用固定副本，避免混用新账号。
  */
 import { readCloudConfig } from './cloudConfig'
 import { readCloudflareSession } from './cloudflareSession'
@@ -12,6 +11,8 @@ export interface CloudflareClient {
   /** 去掉结尾斜杠的 Worker 地址 */
   url: string
   token: string
+  /** 登录验证前尚不知道账号，绑定同步会话时必须存在。 */
+  userId?: string
 }
 
 export function getCloudflareClient(): CloudflareClient | null {
@@ -21,7 +22,7 @@ export function getCloudflareClient(): CloudflareClient | null {
   if (session === null) return null
   const url = config.url.replace(/\/+$/, '')
   if (url === '') return null
-  return { url, token: session.token }
+  return { url, token: session.token, userId: session.userId }
 }
 
 export class CloudRequestError extends Error {
@@ -45,7 +46,7 @@ export class CloudRequestError extends Error {
  */
 export async function cfRequest<T>(
   path: string,
-  options: { method?: 'GET' | 'POST'; body?: unknown; client?: CloudflareClient } = {},
+  options: { method?: 'GET' | 'POST'; body?: unknown; client?: CloudflareClient; signal?: AbortSignal } = {},
 ): Promise<T> {
   const client = options.client ?? getCloudflareClient()
   if (!client) throw new Error('cloud_not_configured')
@@ -53,6 +54,7 @@ export async function cfRequest<T>(
   const method = options.method ?? 'GET'
   const response = await fetch(`${client.url}${path}`, {
     method,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${client.token}`,

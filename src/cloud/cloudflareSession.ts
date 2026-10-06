@@ -1,3 +1,5 @@
+import { invalidateCloudSession } from './sessionScope'
+
 /**
  * Cloudflare 会话的本地存储 —— 相当于 Supabase 那边的「会话」。
  *
@@ -42,6 +44,10 @@ export function readCloudflareSession(): CloudflareSession | null {
 }
 
 export function saveCloudflareSession(session: CloudflareSession | null): void {
+  const previous = readCloudflareSession()
+  if (previous?.token !== session?.token || previous?.userId !== session?.userId) {
+    invalidateCloudSession()
+  }
   try {
     if (session === null) {
       globalThis.localStorage?.removeItem(SESSION_KEY)
