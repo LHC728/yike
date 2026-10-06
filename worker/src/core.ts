@@ -256,18 +256,69 @@ export async function readRecord(
   return row ? toCloudRecord(row) : null
 }
 
+export const PULL_PAGE_SIZE = 500
+export const PULL_MAX_PAGE_SIZE = 1000
+
+export interface PullPageInput {
+  afterId: string | null
+  pageSize: number
+}
+
+export interface PullPageOutput {
+  records: CloudRecordOut[]
+  nextCursor: string | null
+}
+
+/** 旧记录 ID 不必是 UUID；只校验游标形状，不重写历史标识。 */
+export function parsePullPageInput(body: unknown): PullPageInput | null {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null
+  const raw = body as Record<string, unknown>
+  const afterId = raw.afterId
+  const pageSize = raw.pageSize
+  if (afterId !== null && (typeof afterId !== 'string' || afterId.length === 0)) return null
+  if (typeof pageSize !== 'number' || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > PULL_MAX_PAGE_SIZE) return null
+  return { afterId, pageSize }
+}
+
 /**
- * 拉取该用户全部 Record（含软删除的 Tombstone）。
- * 数据量是「一个人的记录」，所以不做分页；上限只是个防呆。
+ * id 永不变、记录永不硬删，因此编辑与软删不会把已有记录移出分页范围。
+ * server_updated_at 会随写入移动，按它或 offset 翻页会漏掉正在变化的记录。
  */
-export async function pullAll(db: D1Database, userId: string): Promise<CloudRecordOut[]> {
+export async function pullPage(
+  db: D1Database,
+  userId: string,
+  input: PullPageInput,
+): Promise<PullPageOutput> {
+  if (parsePullPageInput(input) === null) throw new Error('invalid_pull_page')
+  const { afterId, pageSize } = input
   const result = await db
     .prepare(
-      `select ${RECORD_COLUMNS} from records where user_id = ? order by server_updated_at asc limit 50000`,
+      `select ${RECORD_COLUMNS} from records where user_id = ? and id > ? order by id asc limit ?`,
     )
-    .bind(userId)
+    .bind(userId, afterId ?? '', pageSize + 1)
     .all<RecordRow>()
-  return (result.results ?? []).map(toCloudRecord)
+  if (!result.success || !Array.isArray(result.results)) throw new Error('pull_page_failed')
+  const rows = result.results
+  const records = rows.slice(0, pageSize).map(toCloudRecord)
+  const last = records.at(-1)
+  return { records, nextCursor: rows.length > pageSize && last ? last.id : null }
+}
+
+/** 兼容缓存旧客户端：旧端点仍返回完整数组，不把第一页冒充成全部。 */
+export async function pullAll(db: D1Database, userId: string): Promise<CloudRecordOut[]> {
+  const records: CloudRecordOut[] = []
+  let afterId: string | null = null
+  while (true) {
+    const page = await pullPage(db, userId, { afterId, pageSize: PULL_PAGE_SIZE })
+    records.push(...page.records)
+    if (page.nextCursor === null) break
+    afterId = page.nextCursor
+  }
+  // 原接口的排序语义保留；新分页端点用 id，避免变动时间影响游标。
+  return records.toSorted((a, b) => {
+    if (a.serverUpdatedAt !== b.serverUpdatedAt) return a.serverUpdatedAt < b.serverUpdatedAt ? -1 : 1
+    return a.id < b.id ? -1 : a.id === b.id ? 0 : 1
+  })
 }
 
 // ---------------------------------------------------------------

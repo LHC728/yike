@@ -43,7 +43,13 @@ describe('真实 Supabase SDK 的读取投影', () => {
         // 真实 PostgREST 只返回 select 指定列；不能用总是返回整行的 mock 掩盖漏列。
         const columns = (url.searchParams.get('select') ?? '').split(',')
         const projected = Object.fromEntries(Object.entries(row).filter(([key]) => columns.includes(key)))
-        return json(mode === 'all' ? [projected] : projected)
+        if (mode === 'all') {
+          expect(url.searchParams.get('order')).toBe('id.asc')
+          const after = url.searchParams.get('id')
+          if (after !== null) expect(after).toBe(`gt.${row.id}`)
+          return json(after === null ? [projected] : [])
+        }
+        return json(projected)
       }))
       const adapter = new SupabaseAdapter()
       const result = mode === 'all' ? (await adapter.pullAll('user-a'))[0] : await adapter.pullOne('user-a', row.id)

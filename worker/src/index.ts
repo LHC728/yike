@@ -6,6 +6,7 @@
  * 接口契约（与客户端 CloudAdapter 一一对应）：
  *   GET  /api/health                  健康检查，不需要令牌
  *   POST /api/sync/pull               拉取全部 Record（含软删除 Tombstone）
+ *   POST /api/sync/pull-page          按不可变 id 分页拉取
  *   GET  /api/sync/record?id=<uuid>   拉取单条
  *   POST /api/sync/mutate             原子应用一次 Mutation
  *
@@ -15,6 +16,8 @@
 import {
   applyMutation,
   pullAll,
+  pullPage,
+  parsePullPageInput,
   readRecord,
   readUser,
   resolveUser,
@@ -148,6 +151,18 @@ export default {
 
       if (url.pathname === '/api/sync/pull' && request.method === 'POST') {
         return json({ records: await pullAll(env.DB, userId) }, 200, cors)
+      }
+
+      if (url.pathname === '/api/sync/pull-page' && request.method === 'POST') {
+        let body: unknown
+        try {
+          body = await request.json()
+        } catch {
+          return json({ error: 'invalid_json' }, 400, cors)
+        }
+        const input = parsePullPageInput(body)
+        if (input === null) return json({ error: 'invalid_body' }, 400, cors)
+        return json(await pullPage(env.DB, userId, input), 200, cors)
       }
 
       if (url.pathname === '/api/sync/record' && request.method === 'GET') {

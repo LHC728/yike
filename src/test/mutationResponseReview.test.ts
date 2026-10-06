@@ -89,7 +89,7 @@ for (const provider of ['cloudflare', 'supabase'] as const) {
           if (fault === 'missing-content') delete record['content']
           else if (fault === 'wrong-owner') record[wireKey(provider, 'userId')] = 'user-b'
           else record['id'] = ''
-          const body = provider === 'cloudflare' ? mode === 'all' ? { records: [record] } : { record } : mode === 'all' ? [record] : record
+          const body = provider === 'cloudflare' ? mode === 'all' ? { records: [record], nextCursor: null } : { record } : mode === 'all' ? [record] : record
           vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))
           const sync = async () => {
             if (mode === 'all') await reconcileMany(await adapter.pullAll('user-a'))
@@ -109,7 +109,7 @@ for (const provider of ['cloudflare', 'supabase'] as const) {
         await db.outbox.clear()
         await db.records.update(local.id, { syncState: 'synced', serverVersion: 1 })
         const identity = provider === 'cloudflare' ? { id: local.id, userId: local.userId, version: 2 } : { id: local.id, user_id: local.userId, version: 2 }
-        const body = provider === 'cloudflare' ? mode === 'all' ? { records: [identity] } : { record: identity } : mode === 'all' ? [identity] : identity
+        const body = provider === 'cloudflare' ? mode === 'all' ? { records: [identity], nextCursor: null } : { record: identity } : mode === 'all' ? [identity] : identity
         vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))
         await expect(mode === 'all' ? adapter.pullAll('user-a') : adapter.pullOne('user-a', local.id)).rejects.toThrow('cloud_invalid_record_response')
         expect(await db.records.get(local.id)).toMatchObject({ ...snapshotOf(local), serverVersion: 1 })
@@ -131,7 +131,7 @@ for (const provider of ['cloudflare', 'supabase'] as const) {
       valid['version'] = 2
       valid['content'] = '尚不能接受的远端正文'
       const records = [valid, { id: 'broken', [wireKey(provider, 'userId')]: 'user-a', version: 2 }]
-      const body = provider === 'cloudflare' ? { records } : records
+      const body = provider === 'cloudflare' ? { records, nextCursor: null } : records
       vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })))
       await expect((async () => reconcileMany(await adapter.pullAll('user-a')))()).rejects.toThrow('cloud_invalid_record_response')
       expect(await db.records.get(local.id)).toMatchObject({ content: local.content, serverVersion: 1 })
@@ -155,7 +155,12 @@ for (const provider of ['cloudflare', 'supabase'] as const) {
         const local = await createRecord({ userId: 'user-a', type, content: '旧协议完整核心' })
         const record = completeWire(provider, local)
         for (const field of ['progress', 'deadlineLocalDate', 'parentId']) delete record[wireKey(provider, field)]
-        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(provider === 'cloudflare' ? { records: [record] } : [record]), { status: 200 })))
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+          const after = provider === 'supabase' ? new URL(String(input)).searchParams.get('id') : null
+          if (after !== null) expect(after).toBe(`gt.${local.id}`)
+          const data = provider === 'cloudflare' ? { records: [record], nextCursor: null } : after === null ? [record] : []
+          return new Response(JSON.stringify(data), { status: 200 })
+        }))
         const rows = await adapter.pullAll('user-a')
         expect(rows).toHaveLength(1)
         expect(rows[0]).toMatchObject({ ...snapshotOf(local), id: local.id, userId: local.userId })
@@ -313,7 +318,11 @@ describe('真实 PostgreSQL JSON 经 Supabase SDK 与 Push 确认', () => {
     for (const mode of ['all', 'one'] as const) {
       it(`${label} 的 ${mode} 拉取原样保留微秒与归属`, async () => {
         const adapter = configure('supabase', request.userId)
-        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(mode === 'all' ? [body.record] : body.record), { status: 200 })))
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+          const after = mode === 'all' ? new URL(String(input)).searchParams.get('id') : null
+          if (after !== null) expect(after).toBe(`gt.${request.recordId}`)
+          return new Response(JSON.stringify(mode === 'all' ? after === null ? [body.record] : [] : body.record), { status: 200 })
+        }))
         const record = mode === 'all' ? (await adapter.pullAll(request.userId))[0] : await adapter.pullOne(request.userId, request.recordId)
         expect(record).toMatchObject({ id: request.recordId, userId: request.userId, progress: 0, createdAtUtc: body.record['created_at_utc'], updatedAtUtc: body.record['updated_at_utc'], completedAtUtc: body.record['completed_at_utc'], deletedAtUtc: body.record['deleted_at_utc'], parentId: body.record['parent_id'] })
       })
@@ -362,7 +371,7 @@ it('Supa 第二页损坏时不能把第一页提前交给对账', async () => {
   const first = completeWire('supabase', local)
   first['content'] = '第一页新正文'
   first['version'] = 2
-  const page = Array.from({ length: 500 }, (_value, index) => ({ ...first, id: index === 0 ? local.id : `other-${index}` }))
+  const page = Array.from({ length: 500 }, (_value, index) => ({ ...first, id: index === 0 ? local.id : `r-${String(index).padStart(4, '0')}` }))
   let pages = 0
   vi.stubGlobal('fetch', vi.fn(async () => {
     pages += 1

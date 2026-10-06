@@ -13,7 +13,8 @@ import type { ApplyMutationParams, ApplyMutationResult, CloudAdapter } from './C
 import { SessionChangedError, type SessionScope } from './sessionScope'
 import { cfRequest, getCloudflareClient, type CloudflareClient } from './cloudflareClient'
 import { decodeMutationResponse } from './mutationResponse'
-import { decodeCloudRecordList, decodeCloudRecordResponse, InvalidCloudRecordResponseError } from './recordResponse'
+import { decodeCloudRecordResponse, InvalidCloudRecordResponseError } from './recordResponse'
+import { collectRecordPages } from './pagination'
 
 type Row = Record<string, unknown>
 
@@ -102,10 +103,19 @@ export class CloudflareAdapter implements CloudAdapter {
 
   /** 服务端仍从令牌识别身份；客户端账号校验只负责防止混用会话。 */
   async pullAll(userId: string): Promise<CloudRecord[]> {
-    const data = await cfRequest<unknown>('/api/sync/pull', { method: 'POST', ...this.requestOptions(userId) })
-    this.checkResponse()
-    if (data === null || typeof data !== 'object' || Array.isArray(data)) throw new InvalidCloudRecordResponseError()
-    return decodeCloudRecordList((data as Row)['records'], 'camel', toCloud, userId)
+    try {
+      return await collectRecordPages(async (afterId) => {
+        const data = await cfRequest<unknown>('/api/sync/pull-page', {
+          method: 'POST', ...this.requestOptions(userId), body: { afterId, pageSize: 500 },
+        })
+        this.checkResponse()
+        return data
+      }, (row) => decodeCloudRecordResponse(row, 'camel', toCloud, userId))
+    } catch (error) {
+      // 游标/列表异常同样是不完整云响应，沿用 R22 的失败语义，不返回已读部分。
+      if (error instanceof Error && error.message.startsWith('invalid_pull_page')) throw new InvalidCloudRecordResponseError()
+      throw error
+    }
   }
 
   async pullOne(userId: string, recordId: string): Promise<CloudRecord | null> {

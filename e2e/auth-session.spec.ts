@@ -54,9 +54,17 @@ test('连接成功后恢复写入与同步，新增记录确实送到同一账�
       await route.fulfill({ status: 204, headers })
       return
     }
-    let payload: unknown = { records: rows }
-    if (request.url().endsWith('/api/me')) payload = { userId: 'e2e-A', email: null }
-    if (request.url().endsWith('/api/sync/mutate')) {
+    let payload: unknown = { error: 'not_found' }
+    const pathname = new URL(request.url()).pathname
+    if (pathname === '/api/me') payload = { userId: 'e2e-A', email: null }
+    if (pathname === '/api/sync/pull-page') {
+      expect(request.headers()['authorization']).toBe('Bearer valid-token-A')
+      const body = request.postDataJSON() as { afterId: string | null; pageSize: number }
+      expect(body.afterId).toBeNull()
+      expect(body.pageSize).toBe(500)
+      payload = { records: rows, nextCursor: null }
+    }
+    if (pathname === '/api/sync/mutate') {
       expect(request.headers()['authorization']).toBe('Bearer valid-token-A')
       const mutation = request.postDataJSON() as { recordId: string; payload: Record<string, unknown> }
       contents.push(String(mutation.payload['content']))

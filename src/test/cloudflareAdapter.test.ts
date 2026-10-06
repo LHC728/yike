@@ -88,16 +88,16 @@ describe('是否已配置', () => {
 
 describe('请求怎么发出去', () => {
   it('地址结尾的斜杠被去掉，路径不重复', async () => {
-    const mock = stubFetch({ records: [] })
+    const mock = stubFetch({ records: [], nextCursor: null })
     await adapter.pullAll('user-a')
     expect(mock).toHaveBeenCalledWith(
-      `${WORKER_URL}/api/sync/pull`,
+      `${WORKER_URL}/api/sync/pull-page`,
       expect.objectContaining({ method: 'POST' }),
     )
   })
 
   it('带上 Bearer 令牌', async () => {
-    const mock = stubFetch({ records: [] })
+    const mock = stubFetch({ records: [], nextCursor: null })
     await adapter.pullAll('user-a')
     const headers = (mock.mock.calls[0]?.[1] as RequestInit | undefined)?.headers as
       | Record<string, string>
@@ -115,7 +115,7 @@ describe('请求怎么发出去', () => {
 
   it('没配置就调用 → 立刻报错，不发请求', async () => {
     localStorage.clear()
-    const mock = stubFetch({ records: [] })
+    const mock = stubFetch({ records: [], nextCursor: null })
     await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_not_configured')
     expect(mock).not.toHaveBeenCalled()
   })
@@ -124,6 +124,7 @@ describe('请求怎么发出去', () => {
 describe('pullAll 的字段归一', () => {
   it('完整的一行原样映射（含大事的进度与截止日）', async () => {
     stubFetch({
+      nextCursor: null,
       records: [
         {
           id: 'r-1',
@@ -178,7 +179,7 @@ describe('pullAll 的字段归一', () => {
     delete legacy['progress']
     delete legacy['deadlineLocalDate']
     delete legacy['parentId']
-    stubFetch({ records: [legacy] })
+    stubFetch({ records: [legacy], nextCursor: null })
     const [record] = await adapter.pullAll('user-a')
     expect(record?.progress).toBeNull()
     expect(record?.deadlineLocalDate).toBeNull()
@@ -188,9 +189,10 @@ describe('pullAll 的字段归一', () => {
 
   it('进展：parentId 原样透出，空字符串当「没有父级」', async () => {
     stubFetch({
+      nextCursor: null,
       records: [
-        validRecord({ id: 'r-log', type: 'log', progress: 50, parentId: 'p-1' }),
-        validRecord({ id: 'r-bad', type: 'log', parentId: '' }),
+        validRecord({ id: 'r-001-log', type: 'log', progress: 50, parentId: 'p-1' }),
+        validRecord({ id: 'r-002-null', type: 'log', parentId: '' }),
       ],
     })
     const [log, bad] = await adapter.pullAll('user-a')
@@ -202,6 +204,7 @@ describe('pullAll 的字段归一', () => {
 
   it('叶子函数仍能收敛脏进度与日期，网络接口拒绝把脏记录当成完整事实', async () => {
     stubFetch({
+      nextCursor: null,
       records: [
         validRecord({ id: 'r-1', type: 'project', progress: 999, deadlineLocalDate: '2026-13-45' }),
         validRecord({ id: 'r-2', type: 'project', progress: 'abc', deadlineLocalDate: '' }),
@@ -216,6 +219,7 @@ describe('pullAll 的字段归一', () => {
 
   it('字段缺失 / 类型不对的网络记录必须拒绝，叶子类型归一仍保留', async () => {
     stubFetch({
+      nextCursor: null,
       records: [
         {
           // 缺 id / content / 各种时间
@@ -233,6 +237,7 @@ describe('pullAll 的字段归一', () => {
 
   it('网络回执的空字符串时间不是明确 null，不能静默清除已有完成或软删事实', async () => {
     stubFetch({
+      nextCursor: null,
       records: [
         validRecord({ completedAtUtc: '', completedTimezone: '', deletedAtUtc: '' }),
       ],
@@ -246,7 +251,7 @@ describe('pullAll 的字段归一', () => {
   })
 
   it('records 是 null 必须拒绝，只有显式数组才是完整列表', async () => {
-    stubFetch({ records: null })
+    stubFetch({ records: null, nextCursor: null })
     await expect(adapter.pullAll('user-a')).rejects.toThrow('cloud_invalid_record_response')
   })
 })

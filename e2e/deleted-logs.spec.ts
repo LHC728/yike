@@ -164,7 +164,8 @@ test('R14：排队恢复遇同页账号切换不落库，也不泄露旧账号�
     if (route.request().method() === 'OPTIONS') { await route.fulfill({ status: 204, headers }); return }
     const userId = route.request().headers().authorization?.endsWith('token-B') ? 'restore-B' : 'restore-A'
     const pathname = new URL(route.request().url()).pathname
-    const body = pathname === '/api/me' ? { userId, email: null } : { records: [] }
+    const body = pathname === '/api/me' ? { userId, email: null }
+      : pathname === '/api/sync/pull-page' ? { records: [], nextCursor: null } : { records: [] }
     await route.fulfill({ status: 200, headers, json: body })
   })
   await page.addInitScript(({ url }) => {

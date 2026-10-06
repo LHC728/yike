@@ -52,6 +52,94 @@ afterEach(async () => {
 })
 
 describe('Cloudflare 在途同步的会话隔离', () => {
+  it('新前端连接旧 Worker 的分页 404，保留已同步记录、离线草稿和原队列', async () => {
+    configureAccount('A')
+    const synced = await createRecord({ userId: 'A', type: 'idea', content: '本机已有已同步正文' })
+    await db.outbox.clear()
+    await db.records.update(synced.id, { syncState: 'synced', serverVersion: 1 })
+    await createRecord({ userId: 'A', type: 'log', content: '离线新写的完整进展', parentId: 'project-a', progress: 0 })
+    const recordsBefore = await db.records.toArray()
+    const queueBefore = await db.outbox.toArray()
+    const fetchMock = vi.fn(async (input: string, init: RequestInit) => {
+      expect(new URL(input).pathname).toBe('/api/sync/pull-page')
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer token-A')
+      expect(JSON.parse(String(init.body))).toEqual({ afterId: null, pageSize: 500 })
+      return new Response(JSON.stringify({ error: 'not_found' }), { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    engine.configure({ adapter: new CloudflareAdapter(), userId: 'A', mode: 'cloud' })
+    await engine.sync('manual')
+    expect(syncStatusStore.getSnapshot().phase).toBe('error')
+    expect(await db.records.toArray()).toEqual(recordsBefore)
+    expect(await db.outbox.toArray()).toEqual(queueBefore)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('A 第一页完整但第二页在途时切 B，不部分对账或借 B 凭据续页，旧扫描不清 B 锁', async () => {
+    configureAccount('A')
+    const server = new FakeCloudServer()
+    await createRecord({ userId: 'A', type: 'idea', content: 'A 远端第一页' })
+    const remoteMutation = (await db.outbox.toArray())[0]
+    if (!remoteMutation) throw new Error('expected_mutation')
+    const remote = (await server.applyMutation('A', mutationToParams(remoteMutation))).record
+    if (!remote) throw new Error('expected_cloud_record')
+    await db.outbox.clear()
+    await db.records.clear()
+    const draft = await createRecord({ userId: 'A', type: 'idea', content: 'A 本机待发送草稿' })
+    const aSecond = deferred<Response>()
+    const aStarted = deferred<void>()
+    const bFirst = deferred<Response>()
+    const bStarted = deferred<void>()
+    const requests: { owner: string; afterId: unknown }[] = []
+    let bPulls = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit) => {
+      expect(new URL(input).pathname).toBe('/api/sync/pull-page')
+      const owner = new Headers(init.headers).get('authorization') ?? ''
+      const body = JSON.parse(String(init.body)) as { afterId: unknown; pageSize: number }
+      expect(body.pageSize).toBe(500)
+      requests.push({ owner, afterId: body.afterId })
+      if (owner === 'Bearer token-A') {
+        if (body.afterId === null) return json({ records: [remote], nextCursor: remote.id })
+        expect(body.afterId).toBe(remote.id)
+        aStarted.resolve(undefined)
+        return aSecond.promise
+      }
+      expect(owner).toBe('Bearer token-B')
+      expect(body.afterId).toBeNull()
+      bPulls += 1
+      if (bPulls === 1) { bStarted.resolve(undefined); return bFirst.promise }
+      return json({ records: [], nextCursor: null })
+    }))
+    const adapter = new CloudflareAdapter()
+    engine.configure({ adapter, userId: 'A', mode: 'cloud' })
+    const old = engine.sync('manual')
+    await aStarted.promise
+    expect(await db.records.get(remote.id)).toBeUndefined()
+    engine.stop()
+    configureAccount('B')
+    engine.configure({ adapter, userId: 'B', mode: 'cloud' })
+    const fresh = engine.sync('manual')
+    await bStarted.promise
+    aSecond.resolve(json({ records: [], nextCursor: null }))
+    await old
+    expect(syncStatusStore.getSnapshot().phase).toBe('syncing')
+    expect(await db.records.get(remote.id)).toBeUndefined()
+    expect(await db.records.get(draft.id)).toMatchObject({ userId: 'A', content: draft.content, serverVersion: null })
+    expect(await db.outbox.where('userId').equals('A').count()).toBe(1)
+    expect(requests).toEqual([
+      { owner: 'Bearer token-A', afterId: null },
+      { owner: 'Bearer token-A', afterId: remote.id },
+      { owner: 'Bearer token-B', afterId: null },
+    ])
+    await engine.sync('manual')
+    expect(bPulls).toBe(1)
+    bFirst.resolve(json({ records: [], nextCursor: null }))
+    await fresh
+    await engine.waitIdle()
+    expect(bPulls).toBe(4)
+    expect(requests.filter((request) => request.afterId !== null)).toEqual([{ owner: 'Bearer token-A', afterId: remote.id }])
+  })
+
   it('A 的首轮 Pull 晚返回后，不把 A 草稿用 B 凭据发送或改归属', async () => {
     configureAccount('A')
     const record = await createRecord({ userId: 'A', type: 'idea', content: 'A 的私密草稿' })
@@ -60,12 +148,12 @@ describe('Cloudflare 在途同步的会话隔离', () => {
     const requests: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit) => {
       const owner = new Headers(init.headers).get('authorization')
-      if (input.endsWith('/pull') && owner === 'Bearer token-A') {
+      if (new URL(input).pathname === '/api/sync/pull-page' && owner === 'Bearer token-A') {
         started.resolve(undefined)
         return oldPull.promise
       }
       if (input.endsWith('/mutate')) requests.push(owner ?? '')
-      return json({ records: [] })
+      return json({ records: [], nextCursor: null })
     }))
     const adapter = new CloudflareAdapter()
     engine.configure({ adapter, userId: 'A', mode: 'cloud' })
@@ -75,7 +163,7 @@ describe('Cloudflare 在途同步的会话隔离', () => {
     configureAccount('B')
     engine.configure({ adapter, userId: 'B', mode: 'cloud' })
     await engine.sync('manual')
-    oldPull.resolve(json({ records: [] }))
+    oldPull.resolve(json({ records: [], nextCursor: null }))
     await old
     expect(requests).toEqual([])
     expect((await db.records.get(record.id))?.userId).toBe('A')
@@ -94,7 +182,7 @@ describe('Cloudflare 在途同步的会话隔离', () => {
     const ownerLog: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit) => {
       const owner = new Headers(init.headers).get('authorization') === 'Bearer token-A' ? 'A' : 'B'
-      if (input.endsWith('/pull')) return json({ records: await server.pullAll(owner) })
+      if (new URL(input).pathname === '/api/sync/pull-page') return json({ records: await server.pullAll(owner), nextCursor: null })
       ownerLog.push(owner)
       const result = await server.applyMutation(owner, JSON.parse(String(init.body)))
       if (delay) { delay = false; started.resolve(undefined); return late.promise }
@@ -136,7 +224,7 @@ describe('Cloudflare 在途同步的会话隔离', () => {
       }
       bPulls += 1
       if (bPulls === 1) { bStarted.resolve(undefined); return b.promise }
-      return json({ records: [] })
+      return json({ records: [], nextCursor: null })
     }))
     const adapter = new CloudflareAdapter()
     engine.configure({ adapter, userId: 'A', mode: 'cloud' })
@@ -147,12 +235,12 @@ describe('Cloudflare 在途同步的会话隔离', () => {
     engine.configure({ adapter, userId: 'B', mode: 'cloud' })
     const fresh = engine.sync('manual')
     await bStarted.promise
-    a.resolve(json({ records: [] }))
+    a.resolve(json({ records: [], nextCursor: null }))
     await old
     expect(syncStatusStore.getSnapshot().phase).toBe('syncing')
     await engine.sync('manual')
     expect(bPulls).toBe(1)
-    b.resolve(json({ records: [] }))
+    b.resolve(json({ records: [], nextCursor: null }))
     await fresh
     await engine.waitIdle()
     expect(bPulls).toBe(4)
@@ -176,7 +264,7 @@ describe('Cloudflare 在途同步的会话隔离', () => {
     const rejected = expect(pull).rejects.toThrow('cloud_session_changed')
     await started.promise
     localStorage.setItem('inspiration-todo/cf-session', JSON.stringify({ token: 'token-B', userId: 'B', email: null }))
-    gate.resolve(json({ records: [] }))
+    gate.resolve(json({ records: [], nextCursor: null }))
     await rejected
   })
 })

@@ -27,10 +27,11 @@ async function openCloudA(page: Page): Promise<void> {
       return
     }
     const token = request.headers().authorization ?? ''
+    expect(['Bearer token-A', 'Bearer token-B']).toContain(token)
     const userId = token.endsWith('token-B') ? 'audit-B' : 'audit-A'
     const pathname = new URL(request.url()).pathname
     const body = pathname === '/api/me' ? { userId, email: null }
-      : pathname === '/api/sync/pull' ? { records: [] }
+      : pathname === '/api/sync/pull-page' ? { records: [], nextCursor: null }
         : pathname === '/api/sync/record' ? { record: null }
           : { status: 'applied', version: 2, record: null }
     await route.fulfill({ status: 200, headers, json: body })

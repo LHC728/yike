@@ -18,6 +18,7 @@ import { SessionChangedError, type SessionScope } from './sessionScope'
 import { createSessionSupabaseClient, getSupabaseClient } from './supabaseClient'
 import { decodeMutationResponse } from './mutationResponse'
 import { decodeCloudRecordList, decodeCloudRecordResponse } from './recordResponse'
+import { collectKeysetRows } from './pagination'
 
 const COLUMNS = [
   'id',
@@ -124,24 +125,20 @@ export class SupabaseAdapter implements CloudAdapter {
 
   async pullAll(userId: string): Promise<CloudRecord[]> {
     const client = await this.client(userId)
-    const result: CloudRecord[] = []
-
-    for (let from = 0; from < 200000; from += PAGE_SIZE) {
-      const { data, error } = await client
+    return collectKeysetRows(async (afterId) => {
+      let query = client
         .from('records')
         .select(COLUMNS)
         .eq('user_id', userId)
-        .order('server_updated_at', { ascending: true })
-        .range(from, from + PAGE_SIZE - 1)
-
+        .order('id', { ascending: true })
+        .limit(PAGE_SIZE)
+      if (afterId !== null) query = query.gt('id', afterId)
+      const { data, error } = await query
       this.checkResponse()
       if (error) throw new Error(error.message)
-      const rows = decodeCloudRecordList(data, 'snake', toCloud, userId)
-      result.push(...rows)
-      if (rows.length < PAGE_SIZE) break
-    }
-
-    return result
+      // 整页先校验并转换，再复用不可变 id 的顺序与完整扫描检查。
+      return decodeCloudRecordList(data, 'snake', toCloud, userId)
+    }, (row) => row as unknown as CloudRecord)
   }
 
   async pullOne(userId: string, recordId: string): Promise<CloudRecord | null> {
