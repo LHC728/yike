@@ -12,7 +12,7 @@ export interface RecordWriteTarget extends WriteOwner {
 
 export type EditBaseline = RecordSnapshot
 
-export type WriteFailure = 'session' | 'missing' | 'owner' | 'deleted' | 'conflict' | 'type' | 'parent' | 'failed'
+export type WriteFailure = 'session' | 'missing' | 'owner' | 'deleted' | 'conflict' | 'conflict-updated' | 'type' | 'parent' | 'failed'
 
 export type RecordWriteResult =
   | { status: 'saved' | 'unchanged'; record: LocalRecord }

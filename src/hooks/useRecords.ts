@@ -207,7 +207,9 @@ async function safeWrite(owner: WriteOwner, write: () => Promise<RecordWriteResu
     const result = await write()
     if (didWrite(result) && isWriteOwnerCurrent(owner)) syncEngine.notifyLocalChange()
     if (result.status === 'unavailable' && result.reason !== 'session' && isWriteOwnerCurrent(owner)) {
-      toaster.show({ message: '这次操作没有保存。请保留输入内容，检查记录状态后重试。' })
+      toaster.show({ message: result.reason === 'conflict-updated'
+        ? '另一设备的版本已更新，请查看最新内容后重新选择。'
+        : '这次操作没有保存。请保留输入内容，检查记录状态后重试。' })
     }
     return result
   } catch {
@@ -252,7 +254,7 @@ export const recordActions = {
   restore(target: RecordWriteTarget): Promise<RecordWriteResult> {
     return safeWrite(target, () => restoreOwnedRecord(target, () => isWriteOwnerCurrent(target)))
   },
-  resolveConflict(target: RecordWriteTarget, choice: ConflictChoice, editedContent?: string): Promise<RecordWriteResult> {
-    return safeWrite(target, () => resolveOwnedConflict(target, choice, editedContent, () => isWriteOwnerCurrent(target)))
+  resolveConflict(target: RecordWriteTarget, choice: ConflictChoice, expectedRemoteVersion: number, editedContent?: string): Promise<RecordWriteResult> {
+    return safeWrite(target, () => resolveOwnedConflict(target, choice, editedContent, () => isWriteOwnerCurrent(target), expectedRemoteVersion))
   },
 }

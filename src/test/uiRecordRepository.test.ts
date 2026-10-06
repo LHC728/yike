@@ -43,7 +43,7 @@ describe('UI 账号归属与事务边界', () => {
       () => uncompleteOwnedTodo(wrong, CURRENT),
       () => deleteOwnedRecord(wrong, CURRENT),
       () => restoreOwnedRecord(wrong, CURRENT),
-      () => resolveOwnedConflict(wrong, 'local', undefined, CURRENT),
+      () => resolveOwnedConflict(wrong, 'local', undefined, CURRENT, 2),
     ]
     for (const write of writes) {
       expect(await write()).toEqual({ status: 'unavailable', reason: 'owner' })
@@ -132,7 +132,7 @@ describe('UI 账号归属与事务边界', () => {
   it('冲突裁决同时核对冲突归属；缺失或别人的冲突不能报告成功', async () => {
     const original = await fixture()
     const target = { ...OWNER, recordId: original.id }
-    expect(await resolveOwnedConflict(target, 'remote', undefined, CURRENT))
+    expect(await resolveOwnedConflict(target, 'remote', undefined, CURRENT, 2))
       .toEqual({ status: 'unavailable', reason: 'missing' })
     const snapshot = snapshotOf(original)
     await database.conflicts.put({
@@ -140,7 +140,7 @@ describe('UI 账号归属与事务边界', () => {
       base: snapshot, local: snapshot, remote: { ...snapshot, content: 'B 的错误冲突内容' },
       remoteVersion: 2, createdAt: '2026-10-06T02:00:00.000Z',
     })
-    expect(await resolveOwnedConflict(target, 'remote', undefined, CURRENT))
+    expect(await resolveOwnedConflict(target, 'remote', undefined, CURRENT, 2))
       .toEqual({ status: 'unavailable', reason: 'owner' })
     expect(await database.records.get(original.id)).toEqual(original)
     expect((await database.conflicts.get(original.id))?.userId).toBe('ui-owner-B')

@@ -43,10 +43,16 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
   const conflict = conflicts?.[0] as ConflictEntry | undefined
   if (!conflict) return null
 
-  const isDeleteEdit = conflict.kind === 'delete-edit'
+  // Remote 会在弹窗打开期间刷新，持久化的 kind 未必还是当前两份快照的删除方向。
+  const localDeleted = conflict.local.deletedAtUtc !== null
+  const remoteDeleted = conflict.remote.deletedAtUtc !== null
+  const isDeleteEdit = localDeleted !== remoteDeleted
+  const editChoice = localDeleted ? 'remote' : 'local'
+  const deleteChoice = localDeleted ? 'local' : 'remote'
   // 只在冲突真的落在进度 / 截止日上时才多显示一行，避免平时多出噪音
   const touchesProject =
-    conflict.fields.includes('progress') || conflict.fields.includes('deadlineLocalDate')
+    conflict.fields.includes('progress') || conflict.fields.includes('deadlineLocalDate') ||
+    conflict.local.progress !== conflict.remote.progress || conflict.local.deadlineLocalDate !== conflict.remote.deadlineLocalDate
 
   async function decide(choice: 'local' | 'remote' | 'edited') {
     if (!conflict || !owner || busy) return
@@ -56,6 +62,7 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
       const result = await recordActions.resolveConflict(
         target,
         choice,
+        conflict.remoteVersion,
         choice === 'edited' ? draft : undefined,
       )
       if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
@@ -77,33 +84,32 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
     >
       <p className="text-[14.5px] leading-6 text-ink-soft">
         {isDeleteEdit
-          ? '这条记录已在另一台设备删除，但你在本机修改过它。'
-          : '另一台设备也修改了这条记录。请选择要保留的内容。'}
+          ? (localDeleted
+            ? '你在本机删除了这条记录，但另一台设备修改过它。'
+            : '这条记录已在另一台设备删除，但你在本机修改过它。')
+          : (localDeleted
+            ? '两边都已删除这条记录。请选择要保留的版本。'
+            : '另一台设备也修改了这条记录。请选择要保留的内容。')}
       </p>
 
       <div className="mt-4 space-y-3">
         <ConflictVersion
-          label={isDeleteEdit ? '本机修改的内容' : '本机版本'}
+          label={localDeleted ? '本机已删除的版本' : (isDeleteEdit ? '本机修改的内容' : '本机版本')}
+          deleted={localDeleted}
           content={conflict.local.content}
           time={formatChineseDateTime(conflict.local.updatedAtUtc, conflict.local.updatedTimezone)}
           tone="local"
           extra={touchesProject ? projectExtra(conflict.local) : undefined}
         />
 
-        {isDeleteEdit ? (
-          <div className="rounded-xl border border-line bg-canvas px-3.5 py-3">
-            <div className="text-[12px] text-ink-soft">另一台设备</div>
-            <div className="mt-1 text-[14.5px] text-ink-soft">已删除这条记录</div>
-          </div>
-        ) : (
-          <ConflictVersion
-            label="另一设备版本"
-            content={conflict.remote.content}
-            time={formatChineseDateTime(conflict.remote.updatedAtUtc, conflict.remote.updatedTimezone)}
-            tone="remote"
-            extra={touchesProject ? projectExtra(conflict.remote) : undefined}
-          />
-        )}
+        <ConflictVersion
+          label={remoteDeleted ? '另一设备已删除的版本' : (isDeleteEdit ? '另一设备修改的内容' : '另一设备版本')}
+          deleted={remoteDeleted}
+          content={conflict.remote.content}
+          time={formatChineseDateTime(conflict.remote.updatedAtUtc, conflict.remote.updatedTimezone)}
+          tone="remote"
+          extra={touchesProject ? projectExtra(conflict.remote) : undefined}
+        />
       </div>
 
       {manual ? (
@@ -128,16 +134,16 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
             <button
               type="button"
               disabled={busy}
-              onClick={() => void decide('local')}
+              onClick={() => void decide(editChoice)}
               data-testid="conflict-keep-edit"
               className="tap tap-active h-10 rounded-xl bg-idea px-4 text-[14.5px] font-medium text-on-idea disabled:opacity-50"
             >
-              恢复并保留本机内容
+              {localDeleted ? '恢复并保留另一设备内容' : '恢复并保留本机内容'}
             </button>
             <button
               type="button"
               disabled={busy}
-              onClick={() => void decide('remote')}
+              onClick={() => void decide(deleteChoice)}
               data-testid="conflict-keep-delete"
               className="tap tap-active h-10 rounded-xl border border-line px-4 text-[14.5px] text-ink-soft disabled:opacity-50"
             >
@@ -200,12 +206,14 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
 
 function ConflictVersion({
   label,
+  deleted,
   content,
   time,
   tone,
   extra,
 }: {
   label: string
+  deleted: boolean
   content: string
   time: string
   tone: 'local' | 'remote'
@@ -219,6 +227,7 @@ function ConflictVersion({
       }`}
     >
       <div className="text-[12px] text-ink-soft">{label}</div>
+      {deleted ? <div className="mt-1 text-[12px] text-ink-soft">已删除这条记录</div> : null}
       <div className="mt-1 whitespace-pre-wrap break-words text-[14.5px] leading-[1.55] text-ink">
         {content || '（空）'}
       </div>

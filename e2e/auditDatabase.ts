@@ -33,9 +33,18 @@ interface AuditMutation {
   payload: Record<string, unknown>
 }
 
-interface AuditConflict {
+export type AuditSnapshot = Omit<AuditRecord, 'id' | 'userId' | 'serverVersion' | 'syncState'>
+
+export interface AuditConflict {
   recordId: string
   userId: string
+  kind: 'field' | 'delete-edit'
+  fields: string[]
+  base: AuditSnapshot
+  local: AuditSnapshot
+  remote: AuditSnapshot
+  remoteVersion: number
+  createdAt: string
 }
 
 interface DatabaseSnapshot {
@@ -48,6 +57,7 @@ interface AuditGate {
   started: boolean
   release: () => void
   done: Promise<unknown>
+  conflictUpdate?: { recordId: string; patch: Partial<AuditConflict> }
 }
 
 type AuditWindow = typeof globalThis & { Dexie: DexieConstructor; yikeAuditGate?: AuditGate }
@@ -87,6 +97,45 @@ export async function seedRecords(page: Page, records: AuditRecord[]): Promise<v
   }, records)
 }
 
+/** 冲突是拉取后持久化的三份快照，直接注入测试库以走真实裁决界面。 */
+export async function seedConflict(page: Page, record: AuditRecord, conflict: AuditConflict): Promise<void> {
+  await page.evaluate(async ({ row, entry }) => {
+    const database = new (globalThis as AuditWindow).Dexie('inspiration-todo')
+    await database.open()
+    try {
+      const records = database.table<AuditRecord, string>('records')
+      const conflicts = database.table<AuditConflict, string>('conflicts')
+      await database.transaction('rw', records, conflicts, async () => {
+        await records.put(row)
+        await conflicts.put(entry)
+      })
+    } finally {
+      database.close()
+    }
+  }, { row: record, entry: conflict })
+}
+
+export async function patchConflict(page: Page, recordId: string, patch: Partial<AuditConflict>): Promise<void> {
+  await page.evaluate(async ({ id, next }) => {
+    const database = new (globalThis as AuditWindow).Dexie('inspiration-todo')
+    await database.open()
+    try {
+      await database.table<AuditConflict, string>('conflicts').update(id, next)
+    } finally {
+      database.close()
+    }
+  }, { id: recordId, next: patch })
+}
+
+/** 将远端更新放进前一笔在途事务；后来的 UI 裁决只能在它提交之后读取。 */
+export async function stageBlockedConflictUpdate(page: Page, recordId: string, patch: Partial<AuditConflict>): Promise<void> {
+  await page.evaluate(({ id, next }) => {
+    const gate = (globalThis as AuditWindow).yikeAuditGate
+    if (!gate) throw new Error('未开始测试写事务')
+    gate.conflictUpdate = { recordId: id, patch: next }
+  }, { id: recordId, next: patch })
+}
+
 /** 模拟已拉到的快照；只有测试记录的 outbox 可以按需移除。 */
 export async function patchRecord(page: Page, recordId: string, patch: Partial<AuditRecord>, clearOutbox = false): Promise<void> {
   await page.evaluate(async ({ id, next, clear }) => {
@@ -117,9 +166,12 @@ export async function beginWriteBlock(page: Page): Promise<void> {
     const blocked = new Promise<void>((resolve) => { release = resolve })
     const gate: AuditGate = { started: false, release: () => release(), done: Promise.resolve() }
     scope.yikeAuditGate = gate
-    gate.done = database.transaction('rw', database.table('records'), database.table('outbox'), async () => {
+    gate.done = database.transaction('rw', database.table('records'), database.table('outbox'), database.table('conflicts'), async () => {
       gate.started = true
       await scope.Dexie.waitFor(blocked, 15_000)
+      if (gate.conflictUpdate) {
+        await database.table<AuditConflict, string>('conflicts').update(gate.conflictUpdate.recordId, gate.conflictUpdate.patch)
+      }
     }).finally(() => database.close())
   })
   await page.waitForFunction(() => Boolean((globalThis as AuditWindow).yikeAuditGate?.started))

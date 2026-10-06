@@ -19,6 +19,7 @@ interface OwnedChangeOptions {
   allowDeleted?: boolean
   allowConflict?: boolean
   requireConflict?: boolean
+  expectedConflictVersion?: number
   type?: RecordType
   field?: 'content' | 'progress'
   baseline?: EditBaseline
@@ -47,6 +48,9 @@ export async function runOwnedRecordWrite(
       checkScope(current)
       if (conflict && conflict.userId !== target.userId) return { status: 'unavailable', reason: 'owner' }
       if (options.requireConflict && !conflict) return { status: 'unavailable', reason: 'missing' }
+      if (options.expectedConflictVersion !== undefined && conflict?.remoteVersion !== options.expectedConflictVersion) {
+        return { status: 'unavailable', reason: 'conflict-updated' }
+      }
       if (!options.allowConflict && conflict) return { status: 'unavailable', reason: 'conflict' }
       const { baseline, field } = options
       // 同版本也可能已有本机编辑；只核对正在改的字段，不能误挡另一字段的独立更新。
