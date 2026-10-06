@@ -34,6 +34,7 @@ export function QuickCapture({ userId }: QuickCaptureProps) {
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const wasBusy = useRef(false)
 
   const canSubmit = value.trim().length > 0 && !busy
 
@@ -50,9 +51,12 @@ export function QuickCapture({ userId }: QuickCaptureProps) {
   // 桌面端自动聚焦：光标在输入框里闪，是最直接的「在这里打字」提示。
   // 手机端不自动聚焦，避免一进来就弹出键盘挡住屏幕。
   useEffect(() => {
-    if (!window.matchMedia('(pointer: fine)').matches) return
+    const finished = wasBusy.current && !busy
+    wasBusy.current = busy
+    // 等 React 移除 disabled 再恢复焦点；finally 里直接 focus 会撞上仍禁用的输入框。
+    if (busy || (!finished && !window.matchMedia('(pointer: fine)').matches)) return
     textareaRef.current?.focus()
-  }, [])
+  }, [busy])
 
   async function submit(type: QuickCaptureType) {
     const content = value.trim()
@@ -63,8 +67,6 @@ export function QuickCapture({ userId }: QuickCaptureProps) {
       if (didWrite(result) && isWriteOwnerCurrent(owner)) setValue('')
     } finally {
       setBusy(false)
-      // 保持焦点，方便连续记录
-      textareaRef.current?.focus()
     }
   }
 
@@ -76,6 +78,7 @@ export function QuickCapture({ userId }: QuickCaptureProps) {
       <textarea
         ref={textareaRef}
         value={value}
+        disabled={busy}
         rows={1}
         onChange={(event) => setValue(event.target.value)}
         placeholder="想到什么，先写下来"

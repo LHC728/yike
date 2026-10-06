@@ -7,6 +7,7 @@ import { RecordNode } from './RecordNode'
 import { ProgressTrack, ProjectDeadline } from './ProjectProgress'
 import { captureWriteOwner, isWriteOwnerCurrent } from '../app/writeOwner'
 import { didWrite } from '../domain/write'
+import { useIsMounted } from '../hooks/useIsMounted'
 
 interface ProjectModuleProps {
   userId: string
@@ -161,6 +162,7 @@ function ProjectRow({
  */
 function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => void }) {
   const owner = captureWriteOwner(userId)
+  const isMounted = useIsMounted()
   const [content, setContent] = useState('')
   const [deadline, setDeadline] = useState('')
   const [busy, setBusy] = useState(false)
@@ -186,7 +188,7 @@ function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => v
         // 空字符串表示「没设截止日」，不能存成 ''（那会是个非法日期）
         deadlineLocalDate: deadline === '' ? null : deadline,
       })
-      if (didWrite(result) && isWriteOwnerCurrent(owner)) onDone()
+      if (didWrite(result) && isWriteOwnerCurrent(owner) && isMounted()) onDone()
     } finally {
       setBusy(false)
     }
@@ -197,6 +199,7 @@ function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => v
       <input
         ref={inputRef}
         value={content}
+        disabled={busy}
         onChange={(event) => setContent(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Enter') void submit()
@@ -212,6 +215,7 @@ function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => v
         <input
           type="date"
           value={deadline}
+          disabled={busy}
           onChange={(event) => setDeadline(event.target.value)}
           aria-label="截止日，可以留空"
           data-testid="project-create-deadline"

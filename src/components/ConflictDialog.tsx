@@ -120,6 +120,7 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
           <textarea
             id="conflict-manual"
             value={draft}
+            disabled={busy}
             rows={3}
             autoFocus
             onChange={(event) => setDraft(event.target.value)}
@@ -183,6 +184,7 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
             ) : (
               <button
                 type="button"
+                disabled={busy}
                 onClick={() => {
                   setDraft(conflict.local.content)
                   setManual(true)

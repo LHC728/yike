@@ -76,6 +76,7 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
       <div className="mt-2 flex items-center gap-2">
         <input
           value={draft}
+          disabled={busy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter') void submit()

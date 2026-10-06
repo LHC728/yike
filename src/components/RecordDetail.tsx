@@ -14,6 +14,7 @@ import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/wri
 import { didWrite } from '../domain/write'
 import { useStaleContentEditor } from '../hooks/useStaleContentEditor'
 import { StaleEditNotice } from './StaleEditNotice'
+import { useIsMounted } from '../hooks/useIsMounted'
 
 interface RecordDetailProps {
   userId: string
@@ -30,6 +31,7 @@ interface RecordDetailProps {
  * 保证行为完全一致，只有外壳不同。
  */
 function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recordId: string; onClose: () => void }) {
+  const isMounted = useIsMounted()
   const record = useRecord(userId, recordId)
   const target = recordTarget(captureWriteOwner(userId), recordId)
   const conflict = useLiveQuery(async () => {
@@ -57,7 +59,7 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
     if (!record) return
     const result = await recordActions.remove(target)
     if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
-    onClose()
+    if (isMounted()) onClose()
     // 删除**不再弹撤销**（用户拍板）：删前已经确认过一次了，
     // 删完再拦一次等于同一个动作问两遍。撤销那条留给「打勾」——
     // 那个是一键就能回来的动作，值得给后悔药。
@@ -72,7 +74,7 @@ function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recor
     }
     const result = await recordActions.complete(target)
     if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
-    onClose()
+    if (isMounted()) onClose()
     toaster.show({
       message: '已完成',
       actionLabel: '撤销',

@@ -198,3 +198,28 @@ export async function releaseWriteBlock(page: Page): Promise<void> {
     delete scope.yikeAuditGate
   })
 }
+
+/** 真正的本机事务失败才会触发回滚；网络 mock 无法验证 Local First 保存失败保留输入。 */
+export async function failNextRecordWrite(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const originalPut = IDBObjectStore.prototype.put
+    const originalAdd = IDBObjectStore.prototype.add
+    function failOnce(store: IDBObjectStore, request: IDBRequest<IDBValidKey>): void {
+      if (store.name !== 'records') return
+      IDBObjectStore.prototype.put = originalPut
+      IDBObjectStore.prototype.add = originalAdd
+      // request 执行成功后再 abort，确保失败位于 gate 释放后的真实事务内，而非提前抛在排队前。
+      request.addEventListener('success', () => request.transaction?.abort(), { once: true })
+    }
+    IDBObjectStore.prototype.put = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore['put']>) {
+      const request = originalPut.call(this, ...args)
+      failOnce(this, request)
+      return request
+    }
+    IDBObjectStore.prototype.add = function (this: IDBObjectStore, ...args: Parameters<IDBObjectStore['add']>) {
+      const request = originalAdd.call(this, ...args)
+      failOnce(this, request)
+      return request
+    }
+  })
+}
