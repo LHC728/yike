@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -25,15 +26,23 @@ vi.mock('../cloud/supabaseClient', async (importOriginal) => ({
 let server: SqliteD1 | null = null
 
 beforeEach(async () => {
-  localStorage.clear()
+  // 回执要穿过真实 SQLite；jsdom 的 client 打包会在 CI 的 Node 22 拒绝 node:sqlite。
+  // 只替代会话存储，不把 SQL 或完整回执校验换成假实现。
+  const storage = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => { storage.set(key, value) },
+    removeItem: (key: string) => { storage.delete(key) },
+    clear: () => { storage.clear() },
+  })
   await openDevice(`review-${crypto.randomUUID()}`)
 })
 afterEach(async () => {
   server?.close()
   server = null
   fixture.client = null
-  vi.unstubAllGlobals()
   localStorage.clear()
+  vi.unstubAllGlobals()
   await cleanupDevices()
 })
 
