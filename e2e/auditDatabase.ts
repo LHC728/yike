@@ -58,6 +58,7 @@ interface AuditGate {
   release: () => void
   done: Promise<unknown>
   conflictUpdate?: { recordId: string; patch: Partial<AuditConflict> }
+  conflictInsert?: AuditConflict
 }
 
 type AuditWindow = typeof globalThis & { Dexie: DexieConstructor; yikeAuditGate?: AuditGate }
@@ -136,6 +137,15 @@ export async function stageBlockedConflictUpdate(page: Page, recordId: string, p
   }, { id: recordId, next: patch })
 }
 
+/** 尚未显示的冲突在前一笔事务提交时到达，验证已点击但仍排队的普通写入会拒绝。 */
+export async function stageBlockedConflictInsert(page: Page, conflict: AuditConflict): Promise<void> {
+  await page.evaluate((entry) => {
+    const gate = (globalThis as AuditWindow).yikeAuditGate
+    if (!gate) throw new Error('未开始测试写事务')
+    gate.conflictInsert = entry
+  }, conflict)
+}
+
 /** 模拟已拉到的快照；只有测试记录的 outbox 可以按需移除。 */
 export async function patchRecord(page: Page, recordId: string, patch: Partial<AuditRecord>, clearOutbox = false): Promise<void> {
   await page.evaluate(async ({ id, next, clear }) => {
@@ -172,6 +182,7 @@ export async function beginWriteBlock(page: Page): Promise<void> {
       if (gate.conflictUpdate) {
         await database.table<AuditConflict, string>('conflicts').update(gate.conflictUpdate.recordId, gate.conflictUpdate.patch)
       }
+      if (gate.conflictInsert) await database.table<AuditConflict, string>('conflicts').put(gate.conflictInsert)
     }).finally(() => database.close())
   })
   await page.waitForFunction(() => Boolean((globalThis as AuditWindow).yikeAuditGate?.started))

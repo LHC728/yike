@@ -1,9 +1,10 @@
 import { useState } from 'react'
+import { ChevronRight } from 'lucide-react'
 import { recordActions, useLogsWithDeleted } from '../hooks/useRecords'
 import { useTodayLocalDate } from '../hooks/useToday'
 import { progressOf, type LocalRecord } from '../domain/record'
 import { deviceTimeZone, formatRelativeStamp } from '../utils/time'
-import { toaster } from '../app/toastStore'
+import { toaster, TOAST_NOTICE_MS } from '../app/toastStore'
 import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
 import { didWrite } from '../domain/write'
 import { useStaleContentEditor } from '../hooks/useStaleContentEditor'
@@ -29,6 +30,9 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
   const allLogs = useLogsWithDeleted(userId, project.id)
   const [editingIds, setEditingIds] = useState<Set<string>>(() => new Set())
   const logs = allLogs.filter((log) => log.deletedAtUtc === null || editingIds.has(log.id))
+  // 软删时正在编辑的原行必须继续挂载；取消后再移到恢复区，不能复制一份行抢走草稿。
+  const deletedLogs = allLogs.filter((log) => log.deletedAtUtc !== null && !editingIds.has(log.id))
+  const [showDeleted, setShowDeleted] = useState(false)
   const activeCount = allLogs.filter((log) => log.deletedAtUtc === null).length
   const onEditingChange = (id: string, editing: boolean): void => {
     setEditingIds((previous) => {
@@ -112,6 +116,79 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
           ))}
         </ul>
       )}
+
+      {deletedLogs.length > 0 ? (
+        <section className="mt-2 border-t border-line" data-testid="deleted-logs-tray">
+          <button
+            type="button"
+            onClick={() => setShowDeleted((previous) => !previous)}
+            aria-expanded={showDeleted}
+            data-testid="deleted-logs-toggle"
+            className="tap tap-active flex min-h-[44px] w-full items-center gap-2 text-left"
+          >
+            <ChevronRight size={14} strokeWidth={2} aria-hidden
+              className={`shrink-0 text-ink-soft transition-transform duration-150 ${showDeleted ? 'rotate-90' : ''}`} />
+            <span className="text-[12px] font-medium text-ink-soft">已删除进展</span>
+            <span className="text-[12px] tabular-nums text-ink-soft">{deletedLogs.length} 条</span>
+          </button>
+          {showDeleted ? (
+            <ul className="pb-1">
+              {deletedLogs.map((log) => (
+                <li key={log.id}>
+                  <DeletedLogRow userId={userId} log={log} today={today} />
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+    </div>
+  )
+}
+
+/** Toast 只是快捷入口；持久化的软删行让用户晚些发现误删、刷新后仍能找回同一条。 */
+function DeletedLogRow({ userId, log, today }: { userId: string; log: LocalRecord; today: string }) {
+  const target = recordTarget(captureWriteOwner(userId), log.id)
+  const [restoring, setRestoring] = useState(false)
+
+  async function restore(): Promise<void> {
+    if (restoring) return
+    setRestoring(true)
+    try {
+      const result = await recordActions.restore(target)
+      if (didWrite(result) && isWriteOwnerCurrent(target)) {
+        toaster.show({ message: '已恢复这条进展', duration: TOAST_NOTICE_MS })
+      }
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  return (
+    <div className="flex items-start gap-2 rounded-[10px] px-2 py-2" data-record-id={log.id} data-testid="deleted-log-row">
+      <div className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-2">
+          {log.progress === null ? null : (
+            <span className="shrink-0 text-[12px] tabular-nums text-project">{log.progress}%</span>
+          )}
+          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[15px] leading-[1.5] text-ink-soft">
+            {log.content || '（空）'}
+          </span>
+        </span>
+        <span className="mt-0.5 block text-[12px] leading-4 text-ink-soft" data-testid="deleted-log-stamp">
+          {formatRelativeStamp(log.createdAtUtc, today, log.createdTimezone)}
+        </span>
+      </div>
+      <button
+        type="button"
+        disabled={restoring}
+        onClick={() => void restore()}
+        aria-label={`恢复进展：${log.content}`}
+        data-testid="deleted-log-restore"
+        className="tap tap-active min-h-[44px] min-w-[64px] shrink-0 rounded-[8px] border border-line px-2.5 text-[13px] font-medium text-project disabled:opacity-50"
+      >
+        恢复
+      </button>
     </div>
   )
 }
