@@ -425,8 +425,8 @@ describe('离线连续修改压缩（§58）', () => {
   })
 })
 
-describe('冲突裁决：保留本机', () => {
-  it('保留本机后，服务器最终与本机一致，且非冲突字段的自动合并结果保留', async () => {
+describe('冲突裁决：保留非冲突修改', () => {
+  it.each(['local', 'remote'] as const)('选择 %s 正文后，非冲突的完成动作继续上传', async (choice) => {
     await switchTo('A')
     const todo = await createRecord({ userId: ACCOUNT, type: 'todo', content: 'AAA', nowUtc: '2026-09-29T16:00:00.000Z', timezone: TZ })
     await sync()
@@ -443,13 +443,16 @@ describe('冲突裁决：保留本机', () => {
     await sync()
     expect(await listConflicts(ACCOUNT)).toHaveLength(1)
 
-    await resolveConflict(todo.id, 'local')
+    await resolveConflict(todo.id, choice)
+    expect(await listAllPending(ACCOUNT)).toHaveLength(1)
     await sync()
 
     const remote = server.rows.get(todo.id)!
-    expect(remote.content).toBe('BBB')
+    expect(remote.content).toBe(choice === 'local' ? 'BBB' : 'CCC')
     // 本机的「已完成」是非冲突字段，必须被保留下来
     expect(remote.completedAtUtc).not.toBeNull()
     expect(await listConflicts(ACCOUNT)).toHaveLength(0)
+    expect((await db.records.get(todo.id))?.completedAtUtc).toBe(remote.completedAtUtc)
+    expect(await listAllPending(ACCOUNT)).toHaveLength(0)
   })
 })

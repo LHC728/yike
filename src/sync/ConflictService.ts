@@ -350,30 +350,7 @@ export async function resolveConflict(
   const final = applyConflictChoice(merge, chosen)
   if (editedContent !== undefined) final.content = editedContent.trim()
 
-  if (choice === 'remote') {
-    await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
-      await dropPendingForRecord(recordId)
-      await db.conflicts.delete(recordId)
-      await db.records.where('id').equals(recordId).modify((record) => {
-        record.type = final.type
-        record.content = final.content
-        record.progress = final.progress
-        record.deadlineLocalDate = final.deadlineLocalDate
-        record.createdAtUtc = final.createdAtUtc
-        record.createdTimezone = final.createdTimezone
-        record.createdLocalDate = final.createdLocalDate
-        record.updatedAtUtc = final.updatedAtUtc
-        record.updatedTimezone = final.updatedTimezone
-        record.completedAtUtc = final.completedAtUtc
-        record.completedTimezone = final.completedTimezone
-        record.deletedAtUtc = final.deletedAtUtc
-        record.serverVersion = entry.remoteVersion
-        record.syncState = 'synced'
-      })
-    })
-    return
-  }
-
+  // 选择的是冲突字段的来源；其余本机修改仍要按差量上传，不能冒充已经同步。
   const patch = diffSnapshot(entry.remote, final)
   const operation = operationForDiff(entry.remote, final)
 
