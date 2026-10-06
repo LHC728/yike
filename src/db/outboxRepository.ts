@@ -13,7 +13,9 @@ import type { RecordSnapshot } from '../domain/record'
 export async function listPendingForRecord(recordId: string): Promise<Mutation[]> {
   const list = await db.outbox.where('[recordId+state]').equals([recordId, 'pending']).toArray()
   const sending = await db.outbox.where('[recordId+state]').equals([recordId, 'sending']).toArray()
-  return [...list, ...sending].toSorted((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+  // failed 只是等待重试，并不是用户放弃了草稿；对账必须保留它的基线。
+  const failed = await db.outbox.where('[recordId+state]').equals([recordId, 'failed']).toArray()
+  return [...list, ...sending, ...failed].toSorted((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
 }
 
 /** 某条记录是否有正在发送的 Mutation（此时不参与 Reconcile，等下一轮） */

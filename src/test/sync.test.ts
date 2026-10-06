@@ -10,10 +10,12 @@ import { db, setActiveDatabase, type AppDatabase } from '../db/db'
 import {
   completeTodo,
   createRecord,
+  applyCloudRecord,
   updateContent,
 } from '../db/recordRepository'
 import { listAllPending } from '../db/outboxRepository'
 import { syncEngine } from '../sync/SyncEngine'
+import { pushPending } from '../sync/PushService'
 import { resolveConflict, listConflicts } from '../sync/ConflictService'
 import { cleanupDevices, FakeCloudServer, openDevice } from './fakeCloudServer'
 
@@ -99,15 +101,15 @@ describe('Test 4：多次重试不重复', () => {
     await createRecord({ userId: ACCOUNT, type: 'idea', content: '研究 ROS2', nowUtc: '2026-09-29T16:00:00.000Z', timezone: TZ })
 
     // 第一次：服务器写成功，但客户端收不到响应
-    await sync()
+    await expect(pushPending(server, ACCOUNT)).rejects.toThrow('response_lost')
     expect(server.rows.size).toBe(1)
 
     const [recordId] = Array.from(server.rows.keys())
     if (recordId === undefined) throw new Error('第一次同步后应该有且只有一条记录')
     const versionAfterFirst = server.rows.get(recordId)?.version
 
-    // 客户端重试
-    await sync()
+    // 直接重试写入，明确验证幂等；完整对账也可能发现内容已一致而安全出队。
+    await pushPending(server, ACCOUNT)
     await sync()
 
     expect(server.rows.size).toBe(1)
@@ -162,6 +164,40 @@ describe('Test 6：漏掉 Realtime 也能补回来', () => {
 })
 
 describe('Test 7：同时修改同一字段', () => {
+  it('发送失败的本地编辑遇到远端编辑仍保留三方冲突', async () => {
+    await switchTo('A')
+    const record = await createRecord({ userId: ACCOUNT, type: 'idea', content: '原文', timezone: TZ })
+    await sync()
+    await updateContent(record.id, '本机草稿')
+    await db.outbox.where('recordId').equals(record.id).modify({ state: 'failed', retryCount: 1 })
+
+    const remote = server.rows.get(record.id)
+    if (!remote) throw new Error('缺少服务器基线')
+    server.rows.set(record.id, { ...remote, content: '另一设备编辑', version: remote.version + 1 })
+    await sync()
+
+    const [conflict] = await listConflicts(ACCOUNT)
+    expect(conflict?.base.content).toBe('原文')
+    expect(conflict?.local.content).toBe('本机草稿')
+    expect(conflict?.remote.content).toBe('另一设备编辑')
+    expect((await db.records.get(record.id))?.content).toBe('本机草稿')
+    expect(server.rows.get(record.id)?.content).toBe('另一设备编辑')
+    expect(await listAllPending(ACCOUNT)).toHaveLength(1)
+  })
+
+  it('推送回执不能覆盖仍在 failed 队列里的草稿', async () => {
+    await switchTo('A')
+    const record = await createRecord({ userId: ACCOUNT, type: 'idea', content: '原文', timezone: TZ })
+    await sync()
+    await updateContent(record.id, '待重试草稿')
+    await db.outbox.where('recordId').equals(record.id).modify({ state: 'failed' })
+    const remote = server.rows.get(record.id)
+    if (!remote) throw new Error('缺少服务器基线')
+    await applyCloudRecord({ ...remote, content: '新远端', version: remote.version + 1 })
+    expect((await db.records.get(record.id))?.content).toBe('待重试草稿')
+    expect(await listAllPending(ACCOUNT)).toHaveLength(1)
+  })
+
   it('两边都改 content 且不同 → 必须进入冲突，不能静默覆盖', async () => {
     await switchTo('A')
     const record = await createRecord({ userId: ACCOUNT, type: 'idea', content: 'AAA', nowUtc: '2026-09-29T16:00:00.000Z', timezone: TZ })

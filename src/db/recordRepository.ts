@@ -350,9 +350,10 @@ export async function applyCloudRecord(cloud: CloudRecord): Promise<void> {
 
     const pending = await db.outbox.where('[recordId+state]').equals([cloud.id, 'pending']).count()
     const sending = await db.outbox.where('[recordId+state]').equals([cloud.id, 'sending']).count()
+    const failed = await db.outbox.where('[recordId+state]').equals([cloud.id, 'failed']).count()
     const conflict = await db.conflicts.get(cloud.id)
 
-    if (pending + sending === 0 && !conflict) {
+    if (pending + sending + failed === 0 && !conflict) {
       await db.records.put(fromCloud(cloud, 'synced'))
     } else {
       await db.records.put({ ...local, serverVersion: cloud.version })
