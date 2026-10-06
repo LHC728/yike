@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { pullAll, pullPage, type PullPageOutput } from '../../worker/src/core'
+import { pullAll, pullPage, type D1Database, type D1Statement, type PullPageOutput } from '../../worker/src/core'
 import worker from '../../worker/src/index'
 import { createSqliteD1, seedUser, type SqliteD1 } from './sqliteD1'
 import { CloudflareAdapter } from '../cloud/CloudflareAdapter'
@@ -64,15 +64,37 @@ function seedRows(count: number): void {
     '2026-10-06', '${T0}', 'Asia/Shanghai', 1, '${T0}')`)
 }
 
-function call(path: string, body?: unknown): Promise<Response> {
+function call(path: string, body?: unknown, database: D1Database = db): Promise<Response> {
   return worker.fetch(new Request(`https://draft.invalid${path}`, {
     method: 'POST', headers: { authorization: `Bearer ${TOKEN_A}`, 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }), { DB: db })
+  }), { DB: database })
+}
+
+function withQueryBudget(limit: number): { database: D1Database; queryCount: () => number } {
+  let queries = 0
+  const consume = () => {
+    queries += 1
+    if (queries > limit) throw new Error('too_many_d1_queries')
+  }
+  const database: D1Database = {
+    prepare(query) {
+      const original = db.prepare(query)
+      const limited: D1Statement = {
+        bind(...values) { original.bind(...values); return limited },
+        first<T>() { consume(); return original.first<T>() },
+        all<T>() { consume(); return original.all<T>() },
+        run() { consume(); return original.run() },
+      }
+      return limited
+    },
+    batch(statements) { return db.batch(statements) },
+  }
+  return { database, queryCount: () => queries }
 }
 
 describe('完整拉取兼容与大数据量', () => {
-  it('旧版全量接口超过 50000 条时仍保留末尾进展和软删除', async () => {
+  it('旧版全量接口在含鉴权的 50 次 D1 查询预算内完整返回 50001 条', async () => {
     seedRows(50001)
     const rows = await pullAll(db, USER_A)
     expect(rows).toHaveLength(50001)
@@ -83,14 +105,55 @@ describe('完整拉取兼容与大数据量', () => {
       type: 'log', progress: 0, parentId: 'r-50000', deletedAtUtc: T1, userId: USER_A,
     })
     expect(rows.some((row) => row.userId === USER_B)).toBe(false)
-    const response = await call('/api/sync/pull')
+    // Free 的单次 Worker 请求只允许 50 次 D1 查询，鉴权也算一次；SQLite 本身没有此限制。
+    const budget = withQueryBudget(50)
+    db.exec(`update records set version = 2, server_updated_at = '${T1}' where id = 'r-00001'`)
+    const response = await call('/api/sync/pull', undefined, budget.database)
     expect(response.status).toBe(200)
+    expect(budget.queryCount()).toBe(2)
     const body = await response.json() as { records: typeof rows }
     expect(Object.keys(body)).toEqual(['records'])
     expect(body.records).toHaveLength(50001)
     expect(body.records.find((row) => row.id === 'r-50000')).toMatchObject({ progress: 65, deadlineLocalDate: '2026-10-31' })
     expect(body.records.find((row) => row.id === 'r-50001')).toMatchObject({ type: 'log', progress: 0, parentId: 'r-50000', deletedAtUtc: T1, userId: USER_A })
     expect(body.records.some((row) => row.userId === USER_B)).toBe(false)
+    expect(body.records[0]?.id).toBe('r-00002')
+    expect(body.records.at(-1)).toMatchObject({ id: 'r-00001', version: 2, serverUpdatedAt: T1 })
+    expect(body.records.find((row) => row.id === 'r-50001')).toEqual({
+      id: 'r-50001', userId: USER_A, type: 'log', content: '记录 50001',
+      progress: 0, deadlineLocalDate: null, parentId: 'r-50000',
+      createdAtUtc: T0, createdTimezone: 'Asia/Shanghai', createdLocalDate: '2026-10-06',
+      updatedAtUtc: T0, updatedTimezone: 'Asia/Shanghai',
+      completedAtUtc: null, completedTimezone: null, deletedAtUtc: T1, version: 1, serverUpdatedAt: T0,
+    })
+  })
+
+  it.each(['throw', 'unsuccessful'] as const)('旧全量查询 %s 时返回 500，不能发送部分记录或假空数组', async (mode) => {
+    seedRows(3)
+    const database: D1Database = {
+      prepare(query) {
+        const statement = db.prepare(query)
+        const failed: D1Statement = {
+          ...statement,
+          bind(...values) { statement.bind(...values); return failed },
+          async all<T>() {
+            if (mode === 'throw') throw new Error('read_failed')
+            const partial = await statement.all<T>()
+            return { ...partial, success: false, results: partial.results.slice(0, 1) }
+          },
+        }
+        return failed
+      },
+      batch(statements) { return db.batch(statements) },
+    }
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const response = await call('/api/sync/pull', undefined, database)
+      expect(response.status).toBe(500)
+      expect(await response.json()).toEqual({ error: 'internal_error' })
+    } finally {
+      errorLog.mockRestore()
+    }
   })
 
   it('旧 HTTP 端点保持完整数组形状，新端点单独提供游标', async () => {

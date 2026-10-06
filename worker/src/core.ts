@@ -305,21 +305,18 @@ export async function pullPage(
   return { records, nextCursor: rows.length > pageSize && last ? last.id : null }
 }
 
-/** 兼容缓存旧客户端：旧端点仍返回完整数组，不把第一页冒充成全部。 */
+/**
+ * 缓存旧客户端仍只会请求一次完整数组，不能让它承担新分页协议。
+ * Free 单次 Worker 调用最多 50 次 D1 查询（鉴权也占一次）；在此循环分页会让大用户无法同步。
+ */
 export async function pullAll(db: D1Database, userId: string): Promise<CloudRecordOut[]> {
-  const records: CloudRecordOut[] = []
-  let afterId: string | null = null
-  while (true) {
-    const page = await pullPage(db, userId, { afterId, pageSize: PULL_PAGE_SIZE })
-    records.push(...page.records)
-    if (page.nextCursor === null) break
-    afterId = page.nextCursor
-  }
-  // 原接口的排序语义保留；新分页端点用 id，避免变动时间影响游标。
-  return records.toSorted((a, b) => {
-    if (a.serverUpdatedAt !== b.serverUpdatedAt) return a.serverUpdatedAt < b.serverUpdatedAt ? -1 : 1
-    return a.id < b.id ? -1 : a.id === b.id ? 0 : 1
-  })
+  const result = await db
+    .prepare(`select ${RECORD_COLUMNS} from records where user_id = ? order by server_updated_at asc, id asc`)
+    .bind(userId)
+    .all<RecordRow>()
+  // 失败不能伪装成空数组或部分成功；旧客户端会把完整结果用于对账。
+  if (!result.success || !Array.isArray(result.results)) throw new Error('pull_all_failed')
+  return result.results.map(toCloudRecord)
 }
 
 // ---------------------------------------------------------------
