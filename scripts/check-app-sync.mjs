@@ -38,6 +38,7 @@ const APP = String(flags.get('--app') ?? process.env.YIKE_APP_URL ?? 'http://127
 )
 const BASE = String(flags.get('--url') ?? process.env.YIKE_SYNC_URL ?? '').replace(/\/+$/, '')
 const TOKEN = String(flags.get('--token') ?? process.env.YIKE_SYNC_TOKEN ?? '')
+const LOGIN_STORAGE_KEYS = ['inspiration-todo/cloud-config', 'inspiration-todo/cf-session']
 
 if (BASE === '' || TOKEN === '') {
   process.stderr.write(
@@ -55,6 +56,10 @@ if (BASE === '' || TOKEN === '') {
 let passed = 0
 const failures = []
 
+function redact(value) {
+  return String(value).replaceAll(TOKEN, '[已隐藏令牌]')
+}
+
 function check(name, ok, detail) {
   if (ok) {
     passed += 1
@@ -62,7 +67,7 @@ function check(name, ok, detail) {
   } else {
     failures.push(name)
     process.stdout.write(`  ✗ ${name}\n`)
-    if (detail !== undefined) process.stdout.write(`      ${detail}\n`)
+    if (detail !== undefined) process.stdout.write(`      ${redact(detail)}\n`)
   }
 }
 
@@ -79,6 +84,40 @@ async function api(path, options = {}) {
   return { status: response.status, body: await response.json().catch(() => null) }
 }
 
+async function readLocalCreation(targetPage, identity) {
+  return targetPage.evaluate(
+    (lookup) =>
+      new Promise((resolve, reject) => {
+        const opened = indexedDB.open('inspiration-todo')
+        opened.addEventListener('error', () => reject(new Error('无法读取本机数据库')))
+        opened.addEventListener('success', () => {
+          const db = opened.result
+          const transaction = db.transaction('records', 'readonly')
+          transaction.addEventListener('complete', () => db.close())
+          transaction.addEventListener('abort', () => {
+            db.close()
+            reject(new Error('读取本机记录事务中断'))
+          })
+          const records = transaction.objectStore('records')
+          const request = lookup.id ? records.get(lookup.id) : records.getAll()
+          request.addEventListener('error', () => reject(new Error('无法读取本机记录')))
+          request.addEventListener('success', () => {
+            const record = lookup.id
+              ? request.result
+              : request.result.find((item) => item.content === lookup.content)
+            resolve(record ? {
+              id: record.id,
+              createdAtUtc: record.createdAtUtc,
+              createdLocalDate: record.createdLocalDate,
+              createdTimezone: record.createdTimezone,
+            } : null)
+          })
+        })
+      }),
+    identity,
+  )
+}
+
 const run = Math.random().toString(16).slice(2, 8)
 const CONTENT = `一刻自测 ${run}`
 
@@ -89,11 +128,13 @@ const browser = await chromium.launch()
 // 结果才可复现，也不会把测试数据留在你的真实浏览器里。
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 } })
 const page = await context.newPage()
+let restoredContext = null
 
 const consoleErrors = []
-page.on('console', (message) => {
+function collectConsoleError(message) {
   if (message.type() === 'error') consoleErrors.push(message.text())
-})
+}
+page.on('console', collectConsoleError)
 
 let recordId = null
 
@@ -116,18 +157,24 @@ try {
   )
   await page.getByTestId('record-row').filter({ hasText: CONTENT }).waitFor({ timeout: 10000 })
   check('记录已存到本机', true)
+  const localCreation = await readLocalCreation(page, { content: CONTENT })
+  if (!localCreation || !Object.values(localCreation).every((value) => typeof value === 'string' && value !== '')) {
+    throw new Error('首次本机记录缺少 ID 或创建时间，不能用服务端结果代替基准')
+  }
+  check('首次本机记录的 ID 与创建三字段已读取', true)
 
   // ---------------------------------------------------------------
   section('2. 在界面里配置 Cloudflare 并保存')
 
   await page.getByLabel('设置').click()
+  await page.getByTestId('settings-open-cloud').click()
   await page.getByTestId('settings-provider-cloudflare').click()
   await page.getByLabel('云端地址').fill(BASE)
   await page.getByLabel('访问令牌').fill(TOKEN)
 
-  // 保存后应用会自己 reload，所以等一次 load 事件
+  // 登录配置必须真正保存并完成当前界面的重载；超时不能吞掉后继续算成功。
   await Promise.all([
-    page.waitForEvent('load', { timeout: 20000 }).catch(() => null),
+    page.waitForEvent('load', { timeout: 20000 }),
     page.getByRole('button', { name: '保存连接' }).click(),
   ])
   await page.getByTestId('quick-capture').waitFor({ state: 'visible', timeout: 20000 })
@@ -156,8 +203,8 @@ try {
   section('4. 去线上后端查这条在不在')
 
   const pulled = await api('/api/sync/pull', { method: 'POST', body: {} })
-  const found = (pulled.body?.records ?? []).find((item) => item.content === CONTENT)
-  check('这条记录真的落到了线上数据库', Boolean(found), {
+  const found = (pulled.body?.records ?? []).find((item) => item.id === localCreation.id)
+  check('本机同 ID 的记录真的落到了线上数据库', pulled.status === 200 && Boolean(found), {
     count: pulled.body?.records?.length ?? 0,
     lookingFor: CONTENT,
   })
@@ -165,84 +212,102 @@ try {
   if (found) {
     recordId = found.id
     check('类型是「灵感」', found.type === 'idea', found.type)
-    check('创建时间是本机写下的那一个（没被服务端改掉）', typeof found.createdAtUtc === 'string')
+    check('云端创建时刻与首次本机值相等', found.createdAtUtc === localCreation.createdAtUtc)
+    check('云端创建日期与首次本机值相等', found.createdLocalDate === localCreation.createdLocalDate)
+    check('云端创建时区与首次本机值相等', found.createdTimezone === localCreation.createdTimezone)
     check('版本从 1 开始', found.version === 1, found.version)
   }
 
   // ---------------------------------------------------------------
-  section('5. 反向验证：清掉本机数据后能从云端拉回来')
+  section('5. 反向验证：全新浏览器环境从云端拉回同一条')
 
-  // 只清本机 IndexedDB，不动云端。再打开应用时它应该把这条从云端拉回来 ——
-  // 这才叫「同步」，只有推上去不算。
-  await page.evaluate(async () => {
-    const databases = await indexedDB.databases()
-    await Promise.all(
-      databases
-        .filter((item) => item.name)
-        .map(
-          (item) =>
-            new Promise((resolve) => {
-              const request = indexedDB.deleteDatabase(item.name)
-              // 三个结果都当「删掉了」处理：blocked 表示还有别的连接开着，
-              // 但那是本脚本自己的页面，下一次 goto 会把它换掉。
-              request.addEventListener('success', () => resolve())
-              request.addEventListener('error', () => resolve())
-              request.addEventListener('blocked', () => resolve())
-            }),
-        ),
-    )
+  // 只复制连接与登录 localStorage，不能复制 IndexedDB；旧页的 blocked/error
+  // 从来不代表删除成功，全新的匿名 context 才能排除本机旧记录造成的假阳性。
+  const loginStorage = await page.evaluate(
+    (keys) => keys.map((name) => ({ name, value: localStorage.getItem(name) })),
+    LOGIN_STORAGE_KEYS,
+  )
+  if (loginStorage.some((item) => !item.value)) throw new Error('登录配置未完整落盘，无法验证新设备拉取')
+  restoredContext = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    storageState: { cookies: [], origins: [{ origin: new URL(APP).origin, localStorage: loginStorage }] },
   })
-  await page.goto(APP, { waitUntil: 'load' })
-  await page.getByTestId('quick-capture').waitFor({ state: 'visible', timeout: 20000 })
+  const restoredPage = await restoredContext.newPage()
+  restoredPage.on('console', collectConsoleError)
+  // 首次只加载同源空白页，在应用脚本运行前核验空库；此一次性路由不接管后端请求。
+  await restoredPage.route(new URL(APP).href, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>同步验收空环境</title>' }), { times: 1 })
+  await restoredPage.goto(APP, { waitUntil: 'load' })
+  check('第二个匿名环境在应用启动前没有 IndexedDB', await restoredPage.evaluate(async () => (await indexedDB.databases()).length === 0))
+  await restoredPage.goto(APP, { waitUntil: 'load' })
+  await restoredPage.getByTestId('quick-capture').waitFor({ state: 'visible', timeout: 20000 })
 
   let restored = false
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const count = await page.getByTestId('record-row').filter({ hasText: CONTENT }).count()
+    const count = await restoredPage.getByTestId('record-row').filter({ hasText: CONTENT }).count()
     if (count > 0) {
       restored = true
       break
     }
-    await page.waitForTimeout(500)
+    await restoredPage.waitForTimeout(500)
   }
-  check('清空本机后，记录能从云端拉回来（双向都通）', restored)
+  check('全新环境的界面能显示云端拉回的记录', restored)
+  const restoredCreation = await readLocalCreation(restoredPage, { id: localCreation.id })
+  check('拉回本机的记录 ID 与首次写入相等', restoredCreation?.id === localCreation.id)
+  check('拉回本机的创建时刻与首次值相等', restoredCreation?.createdAtUtc === localCreation.createdAtUtc)
+  check('拉回本机的创建日期与首次值相等', restoredCreation?.createdLocalDate === localCreation.createdLocalDate)
+  check('拉回本机的创建时区与首次值相等', restoredCreation?.createdTimezone === localCreation.createdTimezone)
 
   const appErrors = consoleErrors.filter((text) => !text.includes('favicon'))
   check('全程没有控制台报错', appErrors.length === 0, appErrors.slice(0, 3))
 } catch (error) {
-  failures.push(`脚本执行中断：${error instanceof Error ? error.message : String(error)}`)
-  process.stdout.write(`\n  ✗ 脚本中断：${error instanceof Error ? error.message : String(error)}\n`)
+  const message = redact(error instanceof Error ? error.message : String(error))
+  failures.push(`脚本执行中断：${message}`)
+  process.stdout.write(`\n  ✗ 脚本中断：${message}\n`)
 } finally {
   // ---------------------------------------------------------------
   section('6. 清理本次测试记录')
 
-  if (recordId === null) {
-    const pulled = await api('/api/sync/pull', { method: 'POST', body: {} })
-    recordId = (pulled.body?.records ?? []).find((item) => item.content === CONTENT)?.id ?? null
-  }
+  try {
+    if (recordId === null) {
+      const pulled = await api('/api/sync/pull', { method: 'POST', body: {} })
+      recordId = (pulled.body?.records ?? []).find((item) => item.content === CONTENT)?.id ?? null
+    }
 
-  if (recordId === null) {
-    process.stdout.write('  没有留下测试记录，无需清理。\n')
-  } else {
-    const read = await api(`/api/sync/record?id=${encodeURIComponent(recordId)}`)
-    const version = read.body?.record?.version
-    if (typeof version === 'number') {
-      const now = new Date().toISOString()
-      const result = await api('/api/sync/mutate', {
-        method: 'POST',
-        body: {
-          mutationId: `app-smoke-del-${run}`,
-          recordId,
-          operation: 'delete',
-          expectedVersion: version,
-          payload: { deletedAtUtc: now, updatedAtUtc: now },
-        },
-      })
-      check('测试记录已软删除（界面不会再看到它）', result.body?.status === 'applied', result.body)
+    if (recordId === null) {
+      process.stdout.write('  没有留下测试记录，无需清理。\n')
+    } else {
+      const read = await api(`/api/sync/record?id=${encodeURIComponent(recordId)}`)
+      const version = read.body?.record?.version
+      if (typeof version === 'number') {
+        const now = new Date().toISOString()
+        const result = await api('/api/sync/mutate', {
+          method: 'POST',
+          body: {
+            mutationId: `app-smoke-del-${run}`,
+            recordId,
+            operation: 'delete',
+            expectedVersion: version,
+            payload: { deletedAtUtc: now, updatedAtUtc: now },
+          },
+        })
+        check('测试记录已软删除（界面不会再看到它）', result.body?.status === 'applied', result.body)
+      } else {
+        check('能够读取本次测试记录版本并清理', false)
+      }
+    }
+  } catch (error) {
+    check('本次测试记录的清理请求成功', false, error instanceof Error ? error.message : error)
+  } finally {
+    try {
+      await restoredContext?.close()
+    } finally {
+      try {
+        await context.close()
+      } finally {
+        await browser.close()
+      }
     }
   }
-
-  await context.close()
-  await browser.close()
 }
 
 process.stdout.write('\n' + '─'.repeat(64) + '\n')
