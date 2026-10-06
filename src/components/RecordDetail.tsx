@@ -10,8 +10,11 @@ import { Modal } from './Modal'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ProjectEditor } from './ProjectEditor'
 import { ProjectLogs } from './ProjectLogs'
+import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 interface RecordDetailProps {
+  userId: string
   recordId: string | null
   onClose: () => void
 }
@@ -24,9 +27,13 @@ interface RecordDetailProps {
  * 手机端是底部抽屉，桌面端是右侧面板 —— 两种外壳共用同一个 Body，
  * 保证行为完全一致，只有外壳不同。
  */
-function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: () => void }) {
-  const record = useRecord(recordId)
-  const conflict = useLiveQuery(() => db.conflicts.get(recordId), [recordId])
+function RecordDetailBody({ userId, recordId, onClose }: { userId: string; recordId: string; onClose: () => void }) {
+  const record = useRecord(userId, recordId)
+  const target = recordTarget(captureWriteOwner(userId), recordId)
+  const conflict = useLiveQuery(async () => {
+    const entry = await db.conflicts.get(recordId)
+    return entry?.userId === userId ? entry : undefined
+  }, [userId, recordId])
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -49,8 +56,8 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
     if (!record) return
     setSaving(true)
     try {
-      await recordActions.updateContent(record.id, draft)
-      setEditing(false)
+      const result = await recordActions.updateContent(target, draft)
+      if (didWrite(result) && isWriteOwnerCurrent(target)) setEditing(false)
     } finally {
       setSaving(false)
     }
@@ -58,8 +65,8 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
 
   async function handleDelete() {
     if (!record) return
-    const id = record.id
-    await recordActions.remove(id)
+    const result = await recordActions.remove(target)
+    if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
     onClose()
     // 删除**不再弹撤销**（用户拍板）：删前已经确认过一次了，
     // 删完再拦一次等于同一个动作问两遍。撤销那条留给「打勾」——
@@ -69,18 +76,18 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
 
   async function handleToggleComplete() {
     if (!record) return
-    const id = record.id
     if (record.completedAtUtc) {
-      await recordActions.uncomplete(id)
+      await recordActions.uncomplete(target)
       return
     }
-    await recordActions.complete(id)
+    const result = await recordActions.complete(target)
+    if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
     onClose()
     toaster.show({
       message: '已完成',
       actionLabel: '撤销',
       onAction: () => {
-        void recordActions.uncomplete(id)
+        void recordActions.uncomplete(target)
       },
     })
   }
@@ -113,8 +120,8 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
 
       {record.type === 'project' ? (
         <>
-          <ProjectEditor record={record} />
-          <ProjectLogs project={record} />
+          <ProjectEditor userId={userId} record={record} />
+          <ProjectLogs userId={userId} project={record} />
         </>
       ) : null}
 
@@ -229,17 +236,17 @@ function RecordDetailBody({ recordId, onClose }: { recordId: string; onClose: ()
 }
 
 /** 手机端：底部抽屉 */
-export function RecordDetail({ recordId, onClose }: RecordDetailProps) {
+export function RecordDetail({ userId, recordId, onClose }: RecordDetailProps) {
   if (!recordId) return <Modal open={false} onClose={onClose} />
   return (
     <Modal open onClose={onClose} widthClass="md:max-w-md">
-      <RecordDetailBody recordId={recordId} onClose={onClose} />
+      <RecordDetailBody userId={userId} recordId={recordId} onClose={onClose} />
     </Modal>
   )
 }
 
 /** 桌面端：右侧面板，点开记录不丢失列表上下文 */
-export function RecordDetailPanel({ recordId, onClose }: RecordDetailProps) {
+export function RecordDetailPanel({ userId, recordId, onClose }: RecordDetailProps) {
   /**
    * 面板自己能滚时优先滚面板（符合「滚轮滚鼠标底下那个东西」的直觉），
    * **只有滚到底或内容装得下**的时候，才把剩下的滚动量交给 main。
@@ -283,7 +290,7 @@ export function RecordDetailPanel({ recordId, onClose }: RecordDetailProps) {
 
       {recordId ? (
         <div data-detail-scroll className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          <RecordDetailBody recordId={recordId} onClose={onClose} />
+          <RecordDetailBody userId={userId} recordId={recordId} onClose={onClose} />
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center px-6">

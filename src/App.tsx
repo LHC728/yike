@@ -75,5 +75,5 @@ export default function App() {
     )
   }
 
-  return <AppRouter userId={userId} />
+  return <AppRouter key={`${auth.mode}:${auth.provider ?? 'local'}:${userId}`} userId={userId} />
 }

@@ -10,6 +10,7 @@ import {
 } from '../domain/record'
 import { deviceTimeZone } from '../utils/time'
 import { ProgressTrack, ProjectDeadline } from './ProjectProgress'
+import { captureWriteOwner, recordTarget } from '../app/writeOwner'
 
 /** 快捷档位。拖动滑块调不准的两个极端，用按钮一步到位。 */
 const PRESETS = [0, 25, 50, 75] as const
@@ -28,7 +29,8 @@ const CHIP = 'tap tap-active h-9 flex-1 rounded-[9px] border text-[12.5px] tabul
  *   所以规则是「拖动只改界面，动作结束才落库一次」——
  *   结束的信号是松手（pointerup）、松开按键（keyup）。
  */
-export function ProjectEditor({ record }: { record: LocalRecord }) {
+export function ProjectEditor({ userId, record }: { userId: string; record: LocalRecord }) {
+  const target = recordTarget(captureWriteOwner(userId), record.id)
   const committed = progressOf(record)
   const [dragging, setDragging] = useState(false)
   const [dragValue, setDragValue] = useState(committed)
@@ -45,7 +47,7 @@ export function ProjectEditor({ record }: { record: LocalRecord }) {
   function commit(next: number): void {
     setDragging(false)
     if (next === committed) return
-    void recordActions.setProgress(record.id, next)
+    void recordActions.setProgress(target, next)
   }
 
   const tone = (active: boolean): string =>
@@ -125,7 +127,7 @@ export function ProjectEditor({ record }: { record: LocalRecord }) {
           onChange={(event) => {
             const next = event.target.value
             // 日期框被清空时 value 是 ''，那表示「没有截止日」而不是空字符串
-            void recordActions.setDeadline(record.id, next === '' ? null : next)
+            void recordActions.setDeadline(target, next === '' ? null : next)
           }}
           aria-label="大事截止日"
           data-testid="project-deadline-input"
@@ -134,7 +136,7 @@ export function ProjectEditor({ record }: { record: LocalRecord }) {
         {record.deadlineLocalDate === null ? null : (
           <button
             type="button"
-            onClick={() => void recordActions.setDeadline(record.id, null)}
+            onClick={() => void recordActions.setDeadline(target, null)}
             data-testid="project-deadline-clear"
             className="tap tap-active h-10 shrink-0 rounded-[10px] px-2 text-[12.5px] text-ink-soft"
           >

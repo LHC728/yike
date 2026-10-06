@@ -8,6 +8,8 @@ import { recordActions, useDoneTodos, useOpenTodos } from '../hooks/useRecords'
 import { groupByLocalDate, type LocalRecord } from '../domain/record'
 import { uiActions } from '../app/uiStore'
 import { deviceTimeZone, nowIso } from '../utils/time'
+import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 interface PageProps {
   userId: string
@@ -27,6 +29,7 @@ const EXIT_MS = 420
  * 而弹窗提示只有几秒。有了这块，任何时候都能把误打勾的待办退回去。
  */
 export function TodosPage({ userId }: PageProps) {
+  const owner = captureWriteOwner(userId)
   const timezone = deviceTimeZone()
   const todos = useOpenTodos(userId)
   const done = useDoneTodos(userId)
@@ -47,6 +50,7 @@ export function TodosPage({ userId }: PageProps) {
     (recordId: string) => {
       const record = todos.find((item) => item.id === recordId)
       if (!record) return
+      const target = recordTarget(owner, recordId)
 
       // 立即写库：completed_at = now
       const snapshot: LocalRecord = { ...record, completedAtUtc: nowIso() }
@@ -58,7 +62,15 @@ export function TodosPage({ userId }: PageProps) {
       }, EXIT_MS)
       timers.current.set(recordId, timer)
 
-      void recordActions.complete(recordId).then(() => {
+      void recordActions.complete(target).then((result) => {
+        if (!isWriteOwnerCurrent(target)) return
+        if (!didWrite(result)) {
+          const pending = timers.current.get(recordId)
+          if (pending) window.clearTimeout(pending)
+          timers.current.delete(recordId)
+          setExiting((prev) => prev.filter((item) => item.id !== recordId))
+          return
+        }
         toaster.show({
           message: '已完成',
           actionLabel: '撤销',
@@ -69,20 +81,22 @@ export function TodosPage({ userId }: PageProps) {
               timers.current.delete(recordId)
             }
             setExiting((prev) => prev.filter((item) => item.id !== recordId))
-            void recordActions.uncomplete(recordId)
+            void recordActions.uncomplete(target)
           },
         })
       })
     },
-    [todos],
+    [todos, owner],
   )
 
   /** 从「已完成」区撤销：退回未完成，回到上面的待办列表 */
   const handleUndo = useCallback((recordId: string) => {
-    void recordActions.uncomplete(recordId).then(() => {
+    const target = recordTarget(owner, recordId)
+    void recordActions.uncomplete(target).then((result) => {
+      if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
       toaster.show({ message: '已恢复为待办', duration: TOAST_NOTICE_MS })
     })
-  }, [])
+  }, [owner])
 
   const merged = useMemo(() => {
     const exitingIds = new Set(exiting.map((item) => item.id))

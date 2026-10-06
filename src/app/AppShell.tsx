@@ -82,7 +82,8 @@ export function AppShell({ userId }: AppShellProps) {
 
       {isDesktop ? (
         <RecordDetailPanel
-          key={ui.selectedRecordId ?? 'no-record'}
+          key={`${userId}:${ui.selectedRecordId ?? 'no-record'}`}
+          userId={userId}
           recordId={ui.selectedRecordId}
           onClose={uiActions.closeRecord}
         />
@@ -92,7 +93,8 @@ export function AppShell({ userId }: AppShellProps) {
 
       {isDesktop ? null : (
         <RecordDetail
-          key={ui.selectedRecordId ?? 'no-record'}
+          key={`${userId}:${ui.selectedRecordId ?? 'no-record'}`}
+          userId={userId}
           recordId={ui.selectedRecordId}
           onClose={uiActions.closeRecord}
         />

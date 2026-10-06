@@ -65,6 +65,12 @@ class ToastStore {
     return id
   }
 
+  clear(): void {
+    if (this.items.length === 0) return
+    this.items = []
+    for (const listener of this.listeners) listener()
+  }
+
   dismiss(id: string): void {
     const next = this.items.filter((item) => item.id !== id)
     if (next.length === this.items.length) return

@@ -4,6 +4,8 @@ import { useTodayLocalDate } from '../hooks/useToday'
 import { progressOf, type LocalRecord } from '../domain/record'
 import { deviceTimeZone, formatRelativeStamp } from '../utils/time'
 import { toaster } from '../app/toastStore'
+import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 /**
  * 大事详情里的「进展记录」。
@@ -20,8 +22,9 @@ import { toaster } from '../app/toastStore'
  * 进展是 Record(type = 'log')，**不会出现在首页时间线 / 日历 / 搜索**里，
  * 只在这个面板里看得到。
  */
-export function ProjectLogs({ project }: { project: LocalRecord }) {
-  const logs = useLogs(project.userId, project.id)
+export function ProjectLogs({ userId, project }: { userId: string; project: LocalRecord }) {
+  const target = recordTarget(captureWriteOwner(userId), project.id)
+  const logs = useLogs(userId, project.id)
   const today = useTodayLocalDate(deviceTimeZone())
 
   const [draft, setDraft] = useState('')
@@ -37,8 +40,8 @@ export function ProjectLogs({ project }: { project: LocalRecord }) {
     if (!text || busy) return
     setBusy(true)
     try {
-      await recordActions.createLog(project.userId, project.id, text, currentPercent)
-      setDraft('')
+      const result = await recordActions.createLog(target, text, currentPercent)
+      if (didWrite(result) && isWriteOwnerCurrent(target)) setDraft('')
     } finally {
       setBusy(false)
     }
@@ -91,7 +94,7 @@ export function ProjectLogs({ project }: { project: LocalRecord }) {
         <ul className="mt-3">
           {logs.map((log) => (
             <li key={log.id}>
-              <LogRow log={log} today={today} />
+              <LogRow userId={userId} log={log} today={today} />
             </li>
           ))}
         </ul>
@@ -105,7 +108,8 @@ export function ProjectLogs({ project }: { project: LocalRecord }) {
  * 编辑框里有删除 —— 删除按钮只在编辑态出现，避免在手机上
  * 让一行里挤两个可点区域、误触到删。
  */
-function LogRow({ log, today }: { log: LocalRecord; today: string }) {
+function LogRow({ userId, log, today }: { userId: string; log: LocalRecord; today: string }) {
+  const target = recordTarget(captureWriteOwner(userId), log.id)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(log.content)
   const [saving, setSaving] = useState(false)
@@ -122,21 +126,21 @@ function LogRow({ log, today }: { log: LocalRecord; today: string }) {
     }
     setSaving(true)
     try {
-      await recordActions.updateContent(log.id, text)
-      setEditing(false)
+      const result = await recordActions.updateContent(target, text)
+      if (didWrite(result) && isWriteOwnerCurrent(target)) setEditing(false)
     } finally {
       setSaving(false)
     }
   }
 
   async function remove(): Promise<void> {
-    const id = log.id
-    await recordActions.remove(id)
+    const result = await recordActions.remove(target)
+    if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
     toaster.show({
       message: '已删除这条进展',
       actionLabel: '撤销',
       onAction: () => {
-        void recordActions.restore(id)
+        void recordActions.restore(target)
       },
     })
   }

@@ -5,6 +5,8 @@ import { progressOf, type LocalRecord } from '../domain/record'
 import { uiActions } from '../app/uiStore'
 import { RecordNode } from './RecordNode'
 import { ProgressTrack, ProjectDeadline } from './ProjectProgress'
+import { captureWriteOwner, isWriteOwnerCurrent } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 interface ProjectModuleProps {
   userId: string
@@ -158,6 +160,7 @@ function ProjectRow({
  * 截止日**可以留空** —— 先记下来，之后在详情里补也行。
  */
 function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => void }) {
+  const owner = captureWriteOwner(userId)
   const [content, setContent] = useState('')
   const [deadline, setDeadline] = useState('')
   const [busy, setBusy] = useState(false)
@@ -177,14 +180,13 @@ function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => v
     if (!text || busy) return
     setBusy(true)
     try {
-      await recordActions.create({
-        userId,
+      const result = await recordActions.create(owner, {
         type: 'project',
         content: text,
         // 空字符串表示「没设截止日」，不能存成 ''（那会是个非法日期）
         deadlineLocalDate: deadline === '' ? null : deadline,
       })
-      onDone()
+      if (didWrite(result) && isWriteOwnerCurrent(owner)) onDone()
     } finally {
       setBusy(false)
     }

@@ -53,6 +53,9 @@ export function useUi(): UiState {
 }
 
 export const uiActions = {
+  reset(): void {
+    uiStore.set(INITIAL)
+  },
   openRecord(recordId: string): void {
     uiStore.set({ selectedRecordId: recordId })
   },

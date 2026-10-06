@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { recordActions } from '../hooks/useRecords'
+import { captureWriteOwner, isWriteOwnerCurrent } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 interface QuickCaptureProps {
   userId: string
@@ -28,6 +30,7 @@ type QuickCaptureType = 'idea' | 'todo'
  *   绝不用整体透明表达禁用态 —— 那会让按钮直接消失在白卡片里。
  */
 export function QuickCapture({ userId }: QuickCaptureProps) {
+  const owner = captureWriteOwner(userId)
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -56,8 +59,8 @@ export function QuickCapture({ userId }: QuickCaptureProps) {
     if (!content || busy) return
     setBusy(true)
     try {
-      await recordActions.quickCapture(userId, content, type)
-      setValue('')
+      const result = await recordActions.quickCapture(owner, content, type)
+      if (didWrite(result) && isWriteOwnerCurrent(owner)) setValue('')
     } finally {
       setBusy(false)
       // 保持焦点，方便连续记录

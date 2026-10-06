@@ -4,6 +4,8 @@ import { formatChineseDateTime } from '../utils/time'
 import type { RecordSnapshot } from '../domain/record'
 import type { ConflictEntry } from '../db/db'
 import { Modal } from './Modal'
+import { captureWriteOwner, isWriteOwnerCurrent, recordTarget } from '../app/writeOwner'
+import { didWrite } from '../domain/write'
 
 interface ConflictDialogProps {
   userId: string | null
@@ -33,6 +35,7 @@ function projectExtra(snapshot: RecordSnapshot): string | undefined {
  */
 export function ConflictDialog({ userId }: ConflictDialogProps) {
   const conflicts = useConflicts(userId)
+  const owner = userId ? captureWriteOwner(userId) : null
   const [manual, setManual] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -46,14 +49,16 @@ export function ConflictDialog({ userId }: ConflictDialogProps) {
     conflict.fields.includes('progress') || conflict.fields.includes('deadlineLocalDate')
 
   async function decide(choice: 'local' | 'remote' | 'edited') {
-    if (!conflict || busy) return
+    if (!conflict || !owner || busy) return
+    const target = recordTarget(owner, conflict.recordId)
     setBusy(true)
     try {
-      await recordActions.resolveConflict(
-        conflict.recordId,
+      const result = await recordActions.resolveConflict(
+        target,
         choice,
         choice === 'edited' ? draft : undefined,
       )
+      if (!didWrite(result) || !isWriteOwnerCurrent(target)) return
       setManual(false)
       setDraft('')
     } finally {

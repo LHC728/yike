@@ -5,17 +5,15 @@
  */
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../db/db'
+import type { CreateRecordInput } from '../db/recordRepository'
 import {
-  completeTodo,
-  createRecord,
-  restoreRecord,
-  softDelete,
-  uncompleteTodo,
-  updateContent,
-  updateDeadline,
-  updateProjectProgress,
-  type CreateRecordInput,
-} from '../db/recordRepository'
+  completeOwnedTodo, createOwnedRecord, deleteOwnedRecord, restoreOwnedRecord,
+  uncompleteOwnedTodo, updateOwnedContent, updateOwnedDeadline, updateOwnedProgress,
+} from '../db/uiRecordRepository'
+import { captureWriteOwner, isWriteOwnerCurrent } from '../app/writeOwner'
+import { toaster } from '../app/toastStore'
+import { didWrite, type RecordWriteResult, type RecordWriteTarget, type WriteOwner } from '../domain/write'
+import { resolveOwnedConflict } from '../sync/ownedConflict'
 import { countPending } from '../db/outboxRepository'
 import type { LocalRecord, RecordType } from '../domain/record'
 import {
@@ -32,7 +30,7 @@ import {
   PROGRESS_MAX,
 } from '../domain/record'
 import { syncEngine } from '../sync/SyncEngine'
-import { countConflicts, resolveConflict, type ConflictChoice } from '../sync/ConflictService'
+import { countConflicts, type ConflictChoice } from '../sync/ConflictService'
 
 const EMPTY: LocalRecord[] = []
 
@@ -47,7 +45,7 @@ export function useAllRecords(userId: string | null): LocalRecord[] {
     [userId],
     EMPTY,
   )
-  return records ?? EMPTY
+  return userId ? (records ?? EMPTY).filter((record) => record.userId === userId) : EMPTY
 }
 
 /** 首页时间线：idea + todo，创建时间倒序，已完成仍保留（§78） */
@@ -149,11 +147,14 @@ export function useRecordDates(userId: string | null): Set<string> {
   return dates
 }
 
-export function useRecord(recordId: string | null): LocalRecord | undefined {
-  return useLiveQuery(
-    async () => (recordId ? db.records.get(recordId) : undefined),
-    [recordId],
-  )
+export function useRecord(userId: string | null, recordId: string | null): LocalRecord | undefined {
+  const record = useLiveQuery(async () => {
+    if (!userId || !recordId) return undefined
+    const found = await db.records.get(recordId)
+    return found?.userId === userId ? found : undefined
+  }, [userId, recordId])
+  // liveQuery 的上次结果可能仍在；不能等下一次异步查询才隐藏别人的内容。
+  return record?.userId === userId && record.id === recordId ? record : undefined
 }
 
 export function useSearchResults(userId: string | null, query: string): LocalRecord[] {
@@ -181,103 +182,70 @@ export function useConflictCount(userId: string | null): number {
 }
 
 export function useConflicts(userId: string | null) {
-  return useLiveQuery(
+  const conflicts = useLiveQuery(
     async () => (userId ? db.conflicts.where('userId').equals(userId).toArray() : []),
     [userId],
     [],
   )
+  return (conflicts ?? []).filter((conflict) => conflict.userId === userId)
 }
 
 // ---------------------------------------------------------------
 // 操作：UI 只通过这里写数据
 // ---------------------------------------------------------------
 
-async function afterWrite(): Promise<void> {
-  syncEngine.notifyLocalChange()
+async function safeWrite(owner: WriteOwner, write: () => Promise<RecordWriteResult>): Promise<RecordWriteResult> {
+  if (!isWriteOwnerCurrent(owner)) return { status: 'unavailable', reason: 'session' }
+  try {
+    const result = await write()
+    if (didWrite(result) && isWriteOwnerCurrent(owner)) syncEngine.notifyLocalChange()
+    if (result.status === 'unavailable' && result.reason !== 'session' && isWriteOwnerCurrent(owner)) {
+      toaster.show({ message: '这次操作没有保存。请保留输入内容，检查记录状态后重试。' })
+    }
+    return result
+  } catch {
+    if (isWriteOwnerCurrent(owner)) toaster.show({ message: '没能保存到本机，请保留输入内容后重试。' })
+    return { status: 'unavailable', reason: 'failed' }
+  }
 }
 
+export { captureWriteOwner }
+
 export const recordActions = {
-  async create(input: CreateRecordInput): Promise<LocalRecord> {
-    const record = await createRecord(input)
-    await afterWrite()
-    return record
+  create(owner: WriteOwner, input: Omit<CreateRecordInput, 'userId'>): Promise<RecordWriteResult> {
+    return safeWrite(owner, () => createOwnedRecord(owner, input, () => isWriteOwnerCurrent(owner)))
   },
-
-  /** 记录成本最低：打开 → 输入 → 点「灵感」或「待办」→ 完成（§8） */
-  async quickCapture(userId: string, content: string, type: RecordType): Promise<LocalRecord> {
-    const record = await createRecord({ userId, type, content })
-    await afterWrite()
-    return record
+  quickCapture(owner: WriteOwner, content: string, type: RecordType): Promise<RecordWriteResult> {
+    return recordActions.create(owner, { type, content })
   },
-
-  async updateContent(recordId: string, content: string): Promise<void> {
-    await updateContent(recordId, content)
-    await afterWrite()
+  updateContent(target: RecordWriteTarget, content: string): Promise<RecordWriteResult> {
+    return safeWrite(target, () => updateOwnedContent(target, content, () => isWriteOwnerCurrent(target)))
   },
-
-  /** 大事进度。调用方负责在**松手时**调一次，不要跟着滑块连续调。 */
-  async setProgress(recordId: string, progress: number): Promise<void> {
-    await updateProjectProgress(recordId, progress)
-    await afterWrite()
+  setProgress(target: RecordWriteTarget, progress: number): Promise<RecordWriteResult> {
+    return safeWrite(target, () => updateOwnedProgress(target, progress, () => isWriteOwnerCurrent(target)))
   },
-
-  /** 一键把大事推到 100%（详情里的「完成」按钮） */
-  async finishProject(recordId: string): Promise<void> {
-    await updateProjectProgress(recordId, PROGRESS_MAX)
-    await afterWrite()
+  finishProject(target: RecordWriteTarget): Promise<RecordWriteResult> {
+    return recordActions.setProgress(target, PROGRESS_MAX)
   },
-
-  /** 设置 / 清除大事截止日；传 null 清除 */
-  async setDeadline(recordId: string, deadlineLocalDate: string | null): Promise<void> {
-    await updateDeadline(recordId, deadlineLocalDate)
-    await afterWrite()
+  setDeadline(target: RecordWriteTarget, date: string | null): Promise<RecordWriteResult> {
+    return safeWrite(target, () => updateOwnedDeadline(target, date, () => isWriteOwnerCurrent(target)))
   },
-
-  /**
-   * 给某件大事记一条进展。
-   *
-   * progress 是「写下这条时的进度」**快照**，不是去改大事的进度 ——
-   * 所以这里不会碰大事那条记录。传 null 表示这条不记进度。
-   */
-  async createLog(
-    userId: string,
-    projectId: string,
-    content: string,
-    progress: number | null,
-  ): Promise<LocalRecord> {
-    const record = await createRecord({
-      userId,
-      type: 'log',
-      content,
-      parentId: projectId,
-      progress,
-    })
-    await afterWrite()
-    return record
+  createLog(target: RecordWriteTarget, content: string, progress: number | null): Promise<RecordWriteResult> {
+    return recordActions.create(target, { type: 'log', content, parentId: target.recordId, progress })
   },
-
-  async complete(recordId: string): Promise<void> {
-    await completeTodo(recordId)
-    await afterWrite()
+  complete(target: RecordWriteTarget): Promise<RecordWriteResult> {
+    return safeWrite(target, () => completeOwnedTodo(target, () => isWriteOwnerCurrent(target)))
   },
-
-  async uncomplete(recordId: string): Promise<void> {
-    await uncompleteTodo(recordId)
-    await afterWrite()
+  uncomplete(target: RecordWriteTarget): Promise<RecordWriteResult> {
+    return safeWrite(target, () => uncompleteOwnedTodo(target, () => isWriteOwnerCurrent(target)))
   },
-
-  async remove(recordId: string): Promise<void> {
-    await softDelete(recordId)
-    await afterWrite()
+  remove(target: RecordWriteTarget): Promise<RecordWriteResult> {
+    return safeWrite(target, () => deleteOwnedRecord(target, () => isWriteOwnerCurrent(target)))
   },
-
-  async restore(recordId: string): Promise<void> {
-    await restoreRecord(recordId)
-    await afterWrite()
+  restore(target: RecordWriteTarget): Promise<RecordWriteResult> {
+    return safeWrite(target, () => restoreOwnedRecord(target, () => isWriteOwnerCurrent(target)))
   },
-
-  async resolveConflict(recordId: string, choice: ConflictChoice, editedContent?: string): Promise<void> {
-    await resolveConflict(recordId, choice, editedContent)
-    await afterWrite()
+  resolveConflict(target: RecordWriteTarget, choice: ConflictChoice, editedContent?: string): Promise<RecordWriteResult> {
+    return safeWrite(target, () => resolveOwnedConflict(target, choice, editedContent, () => isWriteOwnerCurrent(target)))
   },
 }
