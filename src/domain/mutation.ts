@@ -49,6 +49,10 @@ export interface Mutation {
   createdAt: string
   retryCount: number
   state: MutationState
+  /** 旧库缺少此标记时无法证明从未发送，按已尝试处理，禁止复用 ID 压缩新变化。 */
+  attempted?: boolean
+  /** 同一记录的入队序号；与用户时间分离，防止同毫秒或设备校时把新修改排到旧包前面。 */
+  queueOrder?: number
 }
 
 /** 合并两个补丁，后者优先 */
@@ -83,7 +87,9 @@ export function canCompress(existing: Mutation, incoming: Mutation): boolean {
   return (
     existing.recordId === incoming.recordId &&
     existing.userId === incoming.userId &&
-    existing.state === 'pending'
+    existing.state === 'pending' &&
+    existing.attempted === false &&
+    incoming.attempted === false
   )
 }
 

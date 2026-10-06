@@ -8,17 +8,18 @@
 import { mutationToParams, type CloudAdapter } from '../cloud/CloudAdapter'
 import { db } from '../db/db'
 import {
+  claimMutation,
   listAllPending,
   markFailed,
   markPending,
-  markSending,
   removeMutation,
 } from '../db/outboxRepository'
-import { applyCloudRecord, setServerVersion } from '../db/recordRepository'
+import { setServerVersion } from '../db/recordRepository'
 import type { Mutation } from '../domain/mutation'
 import { snapshotOf } from '../domain/record'
 import { uuidv4 } from '../utils/id'
 import { nowIso } from '../utils/time'
+import { reconcileOne } from './ReconcileService'
 
 export interface PushStats {
   pushed: number
@@ -28,7 +29,10 @@ export interface PushStats {
 
 /** 上次运行中途被打断留下的 sending 状态，回到 pending 重新发送（幂等保证安全） */
 export async function resetStaleSending(userId: string): Promise<void> {
-  await db.outbox.where('[userId+state]').equals([userId, 'sending']).modify({ state: 'pending' })
+  await db.outbox
+    .where('[userId+state]')
+    .equals([userId, 'sending'])
+    .modify({ state: 'pending', attempted: true })
 }
 
 export async function pushPending(adapter: CloudAdapter, userId: string): Promise<PushStats> {
@@ -68,12 +72,9 @@ async function pushRecord(
   mutations: Mutation[],
   stats: PushStats,
 ): Promise<void> {
-  for (const mutation of mutations) {
-    // 冲突未裁决前不推送这条记录
-    const conflict = await db.conflicts.get(recordId)
-    if (conflict) return
-
-    await markSending(mutation.mutationId)
+  for (const candidate of mutations) {
+    const mutation = await claimMutation(candidate.mutationId, userId)
+    if (!mutation) continue
 
     let result
     try {
@@ -88,12 +89,15 @@ async function pushRecord(
     }
 
     if (result.status === 'applied' || result.status === 'already_applied') {
-      await removeMutation(mutation.mutationId)
-      if (result.record) {
-        await applyCloudRecord(result.record)
-      } else if (result.version !== null) {
-        await setServerVersion(recordId, result.version)
-      }
+      // 确认旧包与下一包重基一起提交，不能让并发推送领取到仍带旧版本的下一包。
+      await db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+        await removeMutation(mutation.mutationId)
+        if (result.record) {
+          await reconcileOne(result.record)
+        } else if (result.version !== null) {
+          await setServerVersion(recordId, result.version)
+        }
+      })
       stats.pushed += 1
       continue
     }
@@ -147,6 +151,7 @@ export async function promoteToCreate(recordId: string): Promise<boolean> {
       createdAt: nowIso(),
       retryCount: 0,
       state: 'pending',
+      attempted: false,
     }
     await db.outbox.put(mutation)
     ok = true

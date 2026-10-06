@@ -394,6 +394,7 @@ export async function resolveConflict(
         createdAt: nowIso(),
         retryCount: 0,
         state: 'pending',
+        attempted: false,
       }
       await enqueueMutation(mutation)
     } else {

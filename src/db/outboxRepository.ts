@@ -9,13 +9,26 @@ import type { Mutation } from '../domain/mutation'
 import { canCompress, compressMutations } from '../domain/mutation'
 import type { RecordSnapshot } from '../domain/record'
 
+function queueOrderOf(mutation: Mutation): number {
+  const value = mutation.queueOrder
+  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : 0
+}
+
+function compareQueueOrder(a: Mutation, b: Mutation): number {
+  // 老版本没有序号；升级后追加的修改必须排在这些尚未确认的旧包之后。
+  const order = queueOrderOf(a) - queueOrderOf(b)
+  if (order !== 0) return order
+  if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1
+  return a.mutationId.localeCompare(b.mutationId)
+}
+
 /** 某条记录所有尚未完成的 Mutation，按入队顺序 */
 export async function listPendingForRecord(recordId: string): Promise<Mutation[]> {
   const list = await db.outbox.where('[recordId+state]').equals([recordId, 'pending']).toArray()
   const sending = await db.outbox.where('[recordId+state]').equals([recordId, 'sending']).toArray()
   // failed 只是等待重试，并不是用户放弃了草稿；对账必须保留它的基线。
   const failed = await db.outbox.where('[recordId+state]').equals([recordId, 'failed']).toArray()
-  return [...list, ...sending, ...failed].toSorted((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+  return [...list, ...sending, ...failed].toSorted(compareQueueOrder)
 }
 
 /** 某条记录是否有正在发送的 Mutation（此时不参与 Reconcile，等下一轮） */
@@ -27,7 +40,7 @@ export async function hasSendingForRecord(recordId: string): Promise<boolean> {
 export async function listAllPending(userId: string): Promise<Mutation[]> {
   const list = await db.outbox.where('[userId+state]').equals([userId, 'pending']).toArray()
   const failed = await db.outbox.where('[userId+state]').equals([userId, 'failed']).toArray()
-  return [...list, ...failed].toSorted((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+  return [...list, ...failed].toSorted(compareQueueOrder)
 }
 
 export async function countPending(userId: string): Promise<number> {
@@ -42,34 +55,46 @@ export async function countPending(userId: string): Promise<number> {
  * 必须在外层 transaction 中调用。
  */
 export async function enqueueMutation(mutation: Mutation): Promise<void> {
-  const pendings = await db.outbox
-    .where('[recordId+state]')
-    .equals([mutation.recordId, 'pending'])
-    .toArray()
-  const existing = pendings.toSorted((a, b) => (a.createdAt < b.createdAt ? -1 : 1))[0]
+  const queued = await listPendingForRecord(mutation.recordId)
+  const existing = queued.find((item) => canCompress(item, mutation))
 
-  if (existing && canCompress(existing, mutation)) {
+  if (existing) {
     const compressed = compressMutations(existing, mutation)
     await db.outbox.put(compressed)
     return
   }
 
-  await db.outbox.put(mutation)
+  const queueOrder = queued.reduce((max, item) => Math.max(max, queueOrderOf(item)), 0) + 1
+  await db.outbox.put({ ...mutation, queueOrder })
 }
 
-export async function markSending(mutationId: string): Promise<void> {
-  await db.outbox.where('mutationId').equals(mutationId).modify({ state: 'sending' })
+/** 扫描得到的只是候选 ID；领取与冻结必须一起提交，防止旧副本吞掉刚保存的 payload。 */
+export async function claimMutation(mutationId: string, userId: string): Promise<Mutation | null> {
+  return db.transaction('rw', db.records, db.outbox, db.conflicts, async () => {
+    const mutation = await db.outbox.get(mutationId)
+    if (!mutation || mutation.userId !== userId || mutation.state === 'sending') return null
+    const record = await db.records.get(mutation.recordId)
+    if (!record || record.userId !== userId) return null
+    if (await db.conflicts.get(mutation.recordId)) return null
+    if (await hasSendingForRecord(mutation.recordId)) return null
+    const [oldest] = await listPendingForRecord(mutation.recordId)
+    if (oldest?.mutationId !== mutationId) return null
+
+    const claimed: Mutation = { ...mutation, state: 'sending', attempted: true }
+    await db.outbox.put(claimed)
+    return claimed
+  })
 }
 
 export async function markPending(mutationId: string): Promise<void> {
-  await db.outbox.where('mutationId').equals(mutationId).modify({ state: 'pending' })
+  await db.outbox.where('mutationId').equals(mutationId).modify({ state: 'pending', attempted: true })
 }
 
 export async function markFailed(mutationId: string, retryCount: number): Promise<void> {
   await db.outbox
     .where('mutationId')
     .equals(mutationId)
-    .modify({ state: 'failed', retryCount })
+    .modify({ state: 'failed', retryCount, attempted: true })
 }
 
 /** 幂等成功：出队 */
@@ -89,6 +114,8 @@ export async function rebasePendingForRecord(
 ): Promise<void> {
   await db.outbox.where('recordId').equals(recordId).modify((mutation) => {
     if (mutation.state === 'pending' || mutation.state === 'failed') {
+      // failed 已经过发送尝试；恢复队列状态不能把这个事实变回「未发送」。
+      if (mutation.state === 'failed') mutation.attempted = true
       mutation.baseSnapshot = baseSnapshot
       mutation.baseServerVersion = baseServerVersion
       mutation.retryCount = 0

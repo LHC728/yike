@@ -96,6 +96,8 @@ describe('Test 3：离线补同步', () => {
 describe('Test 4：多次重试不重复', () => {
   it('服务器已成功但响应丢失，客户端重试不会重复执行', async () => {
     await switchTo('A')
+    // 此例单独验证写入幂等，避免 Realtime 的完整对账提前安全出队。
+    syncEngine.stop()
 
     server.dropNextResponse = true
     await createRecord({ userId: ACCOUNT, type: 'idea', content: '研究 ROS2', nowUtc: '2026-09-29T16:00:00.000Z', timezone: TZ })

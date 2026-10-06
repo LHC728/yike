@@ -116,6 +116,7 @@ export async function createRecord(input: CreateRecordInput): Promise<LocalRecor
     createdAt: captured.utc,
     retryCount: 0,
     state: 'pending',
+    attempted: false,
   }
 
   await db.transaction('rw', db.records, db.outbox, async () => {
@@ -298,6 +299,7 @@ async function commitChange(
       createdAt: captured.utc,
       retryCount: 0,
       state: 'pending',
+      attempted: false,
     })
 
     result = record
@@ -453,6 +455,7 @@ export async function migrateLocalRecordsToUser(targetUserId: string): Promise<n
         createdAt: next.createdAtUtc,
         retryCount: 0,
         state: 'pending',
+        attempted: false,
       })
       migrated += 1
     }
