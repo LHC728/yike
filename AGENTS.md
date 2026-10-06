@@ -263,7 +263,7 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 ## 七、云端后端现状
 
 - **线上在跑的是 Cloudflare**：`https://yike-sync.hl3742198.workers.dev`
-  · D1 库名 `yike-sync` · 迁移已到 **0003**（log + parent_id）
+  · D1 库名 `yike-sync` · 迁移已到 **0004**（log + parent_id + NULL 安全不可变约束，2026-10-06 已备份并验收）
 - **Supabase 是闲置备选**，两套后端语义等价，`CloudAdapter` 是唯一边界
 - ⚠️ **两套后端的行为必须保持一致**。`src/test/fakeCloudServer.ts`（假云服务）
   必须与 `supabase/migrations/0001_init.sql` 行为一致；
