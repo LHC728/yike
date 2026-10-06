@@ -79,7 +79,8 @@ export function ProjectLogs({ userId, project }: { userId: string; project: Loca
           disabled={busy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') void submit()
+            // 输入法确认候选词不等于保存，229 覆盖组合态已结束的浏览器事件。
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) void submit()
           }}
           placeholder="写到哪一步了？"
           aria-label="进展内容"

@@ -202,7 +202,8 @@ function ProjectCreateForm({ userId, onDone }: { userId: string; onDone: () => v
         disabled={busy}
         onChange={(event) => setContent(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') void submit()
+          // 候选词确认也发 Enter；部分浏览器此时组合态已结束，只能再认 229，不能提前存下半句。
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) void submit()
         }}
         placeholder="在做的大事是什么"
         aria-label="大事内容"
