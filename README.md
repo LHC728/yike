@@ -606,6 +606,7 @@ supabase/migrations/0001_init.sql
 supabase/migrations/0002_project_type.sql
 supabase/migrations/0003_log_type.sql
 supabase/migrations/0004_creation_validation.sql
+supabase/migrations/0005_record_invariants.sql
 ```
 
 脚本会创建 `records` / `applied_mutations` 两张表及相关索引、
@@ -614,9 +615,11 @@ supabase/migrations/0004_creation_validation.sql
 - 用户只能 `SELECT` / `INSERT` / `UPDATE` 自己的数据（`user_id = auth.uid()`）
 - **故意不创建 DELETE 策略** → 物理删除在数据库层面被彻底禁止
 
-> **已有数据库只补齐尚未执行的后续迁移**：已经执行到 0003 的库只执行 0004；
+> **已有数据库只补齐尚未执行的后续迁移**：已经执行到 0003 的库按顺序执行 0004、0005；
+> 已经执行到 0004 的库只执行 0005。
 > 更旧的库按上面的顺序补齐。0002 增加大事与进度，0003 增加进展和父级，
 > 0004 校验新记录的创建时刻、日期与时区，不重建表、不搬动已有记录。
+> 0005 增加不可变字段触发器、加强版本递增约束，不替换 0004 的 RPC，也不搬数据。
 > 加列之外还需要更新 `apply_record_mutation` RPC，旧函数不会保存新字段。
 > 不要在新迁移之后重跑旧迁移文件，否则可能把 RPC 换回旧版本。
 
