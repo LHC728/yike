@@ -123,7 +123,8 @@ const TEXT_PAIRS = {
   ink: ['canvas', 'surface', 'sunken'],
   'ink-soft': ['canvas', 'surface', 'sunken'],
   idea: ['canvas', 'surface', 'idea-soft'],
-  todo: ['canvas', 'surface', 'todo-soft'],
+  // 蓝色也用于文字选区，输入区的凹陷底色不能漏掉。
+  todo: ['canvas', 'surface', 'sunken', 'todo-soft'],
   project: ['canvas', 'surface', 'project-soft'],
   danger: ['canvas', 'surface'],
   // 实心按钮 / 打勾里的文字与勾：它们是**内容**，不是装饰。

@@ -237,7 +237,9 @@ html {
   }
 
   ::selection {
-    background: var(--color-idea-soft);
+    /* 浅底色会与页面混在一起；选区用实心蓝，并同步反转文字以兼容深色主题。 */
+    background-color: var(--color-todo);
+    color: var(--color-on-todo);
   }
 }
 
